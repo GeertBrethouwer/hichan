@@ -1,0 +1,11 @@
+! turbulent channel at Re_tau ~ 395 as in Sec. 5.3 of Lenaers et al. (2014):
+! Re_b = 6875, box 2pi x pi, 256 x 193 x 192, tanh grid alpha_s = 4 (dy+ = 0.62 ... 8.5)
+! restart from a Re_tau = 180 field or start from noise (transition takes ~100-200 h/U_b)
+&grid nx=256, ny=193, nz=192, lx=6.283185307179586, lz=3.141592653589793, grid_type='tanh', grid_alpha=4.0, fd_order=6 /
+&physics re=6875., forcing='cfr', ubulk=1.0, nl_form='rotational', visc_theta=0.0 /   ! visc_theta=0.5 -> implicit (Appendix B.2)
+&time nstep=1000000, tmax=1500., wall_time_max=85000., cfl=1.2, cfl_visc=1.5 /
+&init init_type='noise', init_amp=0.25 /
+&output data_dir='data', iout_log=100, iout_stats=20, iout_save_stats=5000, iout_restart=10000, iout_field=0, tstats_start=500. /
+&scalars nscal=2, pr=0.71,0.025, scal_theta=0.5,0.5, sbc_bot='D','D', sbc_top='D','D', sval_bot=0.,0., sval_top=0.,0.,
+ ssrc_u=1.,1., sinit='zero','zero' /
+&parallel pdims=0,0, cudecomp_t_backend=0, cudecomp_enable_nccl=.true., cudecomp_enable_nvshmem=.false. /

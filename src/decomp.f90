@@ -1,0 +1,410 @@
+!
+! 2D pencil decomposition and global transposes
+!
+! Two grids are used (all spectral data complex):
+!   grid A, global (nxh, mz, ny): used between the x-FFT and the z-FFT
+!     xa(nxh, nzA, nyA)   x-pencil (axis 1 local), natural memory order
+!     ya(mz , nyA, nkx)   y-pencil (axis 2 local), memory order (2,3,1)
+!   grid B, global (nxh, nz, ny): used between the z-FFT and the wall-normal solves
+!     yb(nz , nyA, nkx)   y-pencil, memory order (2,3,1)
+!     zb(nkx, nkz, ny )   z-pencil (axis 3 = wall-normal direction local), natural order
+! Axis 1 = streamwise (kx), axis 2 = spanwise (z/kz), axis 3 = wall-normal (y).
+! Process grid p1 x p2: in the x-pencil axis 2 is split over p1 and axis 3 over p2,
+! in the y-pencil axis 1 over p1 and axis 3 over p2, in the z-pencil axis 1 over p1
+! and axis 2 over p2 (same convention as 2DECOMP&FFT and cuDecomp).
+!
+! With -D_USE_CUDECOMP the transposes are done by NVIDIA cuDecomp (as in CaNS, with
+! autotuning of the process grid and of the communication backend: MPI, NCCL, NVSHMEM).
+! Otherwise a portable MPI_Alltoallv implementation is used (CUDA-aware MPI on GPUs).
+!
+module mod_decomp
+  use mpi
+  use mod_types
+  use mod_param, only: nxh,mx,mz,nz,ny,pdims,abort_run, &
+                       cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
+#if defined(_OPENACC)
+  use openacc
+#endif
+#if defined(_USE_CUDECOMP)
+  use cudecomp
+#endif
+  implicit none
+  private
+  public :: init_decomp,finalize_decomp,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb
+  integer, public :: myid,nproc,p1,p2,cx1,cx2
+  integer, public :: zA_lo,nzA,yA_lo,nyA,kx_lo,nkx,kz_lo,nkz
+#if defined(_OPENACC)
+  integer(acc_handle_kind), public :: istream
+#endif
+#if defined(_USE_CUDECOMP)
+  type(cudecompHandle)   :: ch
+  type(cudecompGridDesc) :: gd_a,gd_b
+  complex(rp), pointer, contiguous :: work(:)
+  complex(rp), pointer, contiguous, device :: work_d(:)
+#else
+  integer :: comm_row,comm_col
+  integer, allocatable :: kxlo_r(:),nkx_r(:),zlo_r(:),nz_r(:)   ! per peer in the row communicator
+  integer, allocatable :: kzlo_c(:),nkz_c(:),ylo_c(:),ny_c(:)   ! per peer in the column communicator
+  integer, allocatable :: own_kx(:),own_z(:),own_kz(:),own_y(:)
+  integer, allocatable :: sc_xy(:),sd_xy(:),rc_xy(:),rd_xy(:)
+  integer, allocatable :: sc_yz(:),sd_yz(:),rc_yz(:),rd_yz(:)
+  complex(rp), allocatable :: sbuf(:),rbuf(:)
+#endif
+contains
+  subroutine init_decomp
+    implicit none
+    integer :: ierr
+    call MPI_COMM_RANK(MPI_COMM_WORLD,myid ,ierr)
+    call MPI_COMM_SIZE(MPI_COMM_WORLD,nproc,ierr)
+#if defined(_OPENACC)
+    call init_device
+#endif
+#if defined(_USE_CUDECOMP)
+    call init_cudecomp
+#else
+    call init_mpi_transposes
+#endif
+#if defined(_OPENACC)
+    istream = acc_get_cuda_stream(1)
+#endif
+    if(myid == 0) then
+      write(*,'(a,i0,a,i0)') ' process grid p1 x p2 = ',p1,' x ',p2
+    end if
+  end subroutine init_decomp
+  !
+#if defined(_OPENACC)
+  subroutine init_device
+    use cudafor, only: cudaGetDeviceCount,cudaSetDevice
+    implicit none
+    integer :: local_comm,mydev,ndev,istat,ierr
+    integer(acc_device_kind) :: dev_type
+    call MPI_COMM_SPLIT_TYPE(MPI_COMM_WORLD,MPI_COMM_TYPE_SHARED,0,MPI_INFO_NULL,local_comm,ierr)
+    call MPI_COMM_RANK(local_comm,mydev,ierr)
+    istat = cudaGetDeviceCount(ndev)
+    mydev = mod(mydev,ndev)
+    istat = cudaSetDevice(mydev)
+    dev_type = acc_get_device_type()
+    call acc_set_device_num(mydev,dev_type)
+    call MPI_COMM_FREE(local_comm,ierr)
+  end subroutine init_device
+#endif
+  !
+  pure subroutine distribute(n,p,c,lo,cnt)
+    ! block distribution of n points over p processes (remainder to the last ones)
+    implicit none
+    integer, intent(in)  :: n,p,c
+    integer, intent(out) :: lo,cnt
+    integer :: base,nrem
+    base = n/p
+    nrem = n - base*p
+    if(c < p-nrem) then
+      cnt = base
+      lo  = 1 + c*base
+    else
+      cnt = base+1
+      lo  = 1 + (p-nrem)*base + (c-(p-nrem))*(base+1)
+    end if
+  end subroutine distribute
+  !
+#if !defined(_USE_CUDECOMP)
+  subroutine init_mpi_transposes
+    implicit none
+    integer :: dims(2),ierr,p,i
+    if(all(pdims(:) > 0)) then
+      if(pdims(1)*pdims(2) /= nproc) call abort_run('pdims(1)*pdims(2) /= number of MPI processes')
+      dims(:) = pdims(:)
+    else
+      dims(:) = 0
+      call MPI_DIMS_CREATE(nproc,2,dims,ierr)
+      ! prefer a larger p1 (x<->y transposes stay within a node for p1 <= GPUs per node)
+      if(dims(2) > dims(1)) dims(:) = [dims(2),dims(1)]
+    end if
+    p1 = dims(1); p2 = dims(2)
+    if(p1 > min(nxh,mz) .or. p2 > min(nz,ny)) call abort_run('process grid too large for the problem size')
+    cx1 = mod(myid,p1)
+    cx2 = myid/p1
+    call MPI_COMM_SPLIT(MPI_COMM_WORLD,cx2,cx1,comm_row,ierr) ! varying cx1
+    call MPI_COMM_SPLIT(MPI_COMM_WORLD,cx1,cx2,comm_col,ierr) ! varying cx2
+    allocate(kxlo_r(0:p1-1),nkx_r(0:p1-1),zlo_r(0:p1-1),nz_r(0:p1-1))
+    allocate(kzlo_c(0:p2-1),nkz_c(0:p2-1),ylo_c(0:p2-1),ny_c(0:p2-1))
+    do p=0,p1-1
+      call distribute(nxh,p1,p,kxlo_r(p),nkx_r(p))
+      call distribute(mz ,p1,p,zlo_r(p) ,nz_r(p) )
+    end do
+    do p=0,p2-1
+      call distribute(nz,p2,p,kzlo_c(p),nkz_c(p))
+      call distribute(ny,p2,p,ylo_c(p) ,ny_c(p) )
+    end do
+    kx_lo = kxlo_r(cx1); nkx = nkx_r(cx1)
+    zA_lo = zlo_r(cx1) ; nzA = nz_r(cx1)
+    kz_lo = kzlo_c(cx2); nkz = nkz_c(cx2)
+    yA_lo = ylo_c(cx2) ; nyA = ny_c(cx2)
+    allocate(own_kx(nxh),own_z(mz),own_kz(nz),own_y(ny))
+    do p=0,p1-1
+      own_kx(kxlo_r(p):kxlo_r(p)+nkx_r(p)-1) = p
+      own_z(zlo_r(p):zlo_r(p)+nz_r(p)-1) = p
+    end do
+    do p=0,p2-1
+      own_kz(kzlo_c(p):kzlo_c(p)+nkz_c(p)-1) = p
+      own_y(ylo_c(p):ylo_c(p)+ny_c(p)-1) = p
+    end do
+    allocate(sc_xy(0:p1-1),sd_xy(0:p1-1),rc_xy(0:p1-1),rd_xy(0:p1-1))
+    allocate(sc_yz(0:p2-1),sd_yz(0:p2-1),rc_yz(0:p2-1),rd_yz(0:p2-1))
+    do p=0,p1-1
+      sc_xy(p) = nkx_r(p)*nzA*nyA
+      rc_xy(p) = nkx*nz_r(p)*nyA
+    end do
+    do p=0,p2-1
+      sc_yz(p) = nkz_c(p)*nyA*nkx
+      rc_yz(p) = nkz*ny_c(p)*nkx
+    end do
+    sd_xy(0) = 0; rd_xy(0) = 0; sd_yz(0) = 0; rd_yz(0) = 0
+    do p=1,p1-1
+      sd_xy(p) = sd_xy(p-1)+sc_xy(p-1)
+      rd_xy(p) = rd_xy(p-1)+rc_xy(p-1)
+    end do
+    do p=1,p2-1
+      sd_yz(p) = sd_yz(p-1)+sc_yz(p-1)
+      rd_yz(p) = rd_yz(p-1)+rc_yz(p-1)
+    end do
+    i = max(nxh*nzA*nyA,mz*nyA*nkx,nz*nyA*nkx,nkx*nkz*ny)
+    allocate(sbuf(i),rbuf(i))
+    !$acc enter data copyin(kxlo_r,nkx_r,zlo_r,nz_r,kzlo_c,nkz_c,ylo_c,ny_c, &
+    !$acc                   own_kx,own_z,own_kz,own_y,sd_xy,rd_xy,sd_yz,rd_yz) create(sbuf,rbuf)
+  end subroutine init_mpi_transposes
+#endif
+  !
+#if defined(_USE_CUDECOMP)
+  subroutine init_cudecomp
+    implicit none
+    type(cudecompGridDescConfig) :: conf
+    type(cudecompGridDescAutotuneOptions) :: atune
+    type(cudecompPencilInfo) :: pxa,pya,pyb,pzb
+    integer :: istat
+    integer(i8) :: wsa,wsb,wsize
+    istat = cudecompInit(ch,MPI_COMM_WORLD)
+    !
+    ! grid B (z-FFT <-> wall-normal solves): autotune process grid and backend
+    !
+    istat = cudecompGridDescConfigSetDefaults(conf)
+    conf%gdims(:) = [nxh,nz,ny]
+    conf%pdims(:) = pdims(:)
+    conf%transpose_axis_contiguous(:) = [.true.,.true.,.false.]
+    conf%transpose_comm_backend = cudecomp_t_backend
+    istat = cudecompGridDescAutotuneOptionsSetDefaults(atune)
+    atune%dtype = CUDECOMP_DOUBLE_COMPLEX
+    atune%grid_mode = CUDECOMP_AUTOTUNE_GRID_TRANSPOSE
+    atune%autotune_transpose_backend = (cudecomp_t_backend == 0)
+    atune%disable_nccl_backends    = .not.cudecomp_enable_nccl
+    atune%disable_nvshmem_backends = .not.cudecomp_enable_nvshmem
+    atune%transpose_op_weights(:) = [1.,1.,1.,1.]
+    if(cudecomp_t_backend == 0) conf%transpose_comm_backend = CUDECOMP_TRANSPOSE_COMM_MPI_A2A
+    istat = cudecompGridDescCreate(ch,gd_b,conf,atune)
+    if(istat /= CUDECOMP_RESULT_SUCCESS) call abort_run('cudecompGridDescCreate failed (grid B)')
+    p1 = conf%pdims(1); p2 = conf%pdims(2)
+    if(myid == 0) write(*,'(a,a)') ' cuDecomp transpose backend (grid B): ', &
+                  cudecompTransposeCommBackendToString(conf%transpose_comm_backend)
+    !
+    ! grid A (x-FFT <-> z-FFT): same process grid, autotune the backend only
+    !
+    istat = cudecompGridDescConfigSetDefaults(conf)
+    conf%gdims(:) = [nxh,mz,ny]
+    conf%pdims(:) = [p1,p2]
+    conf%transpose_axis_contiguous(:) = [.true.,.true.,.false.]
+    conf%transpose_comm_backend = cudecomp_t_backend
+    if(cudecomp_t_backend == 0) conf%transpose_comm_backend = CUDECOMP_TRANSPOSE_COMM_MPI_A2A
+    atune%grid_mode = CUDECOMP_AUTOTUNE_GRID_TRANSPOSE
+    istat = cudecompGridDescCreate(ch,gd_a,conf,atune)
+    if(istat /= CUDECOMP_RESULT_SUCCESS) call abort_run('cudecompGridDescCreate failed (grid A)')
+    if(myid == 0) write(*,'(a,a)') ' cuDecomp transpose backend (grid A): ', &
+                  cudecompTransposeCommBackendToString(conf%transpose_comm_backend)
+    !
+    istat = cudecompGetPencilInfo(ch,gd_a,pxa,1)
+    istat = cudecompGetPencilInfo(ch,gd_a,pya,2)
+    istat = cudecompGetPencilInfo(ch,gd_b,pyb,2)
+    istat = cudecompGetPencilInfo(ch,gd_b,pzb,3)
+    ! x-pencil, order (1,2,3)
+    zA_lo = pxa%lo(2); nzA = pxa%shape(2)
+    yA_lo = pxa%lo(3); nyA = pxa%shape(3)
+    ! y-pencil, order (2,3,1)
+    if(any(pya%order(:) /= [2,3,1]) .or. any(pyb%order(:) /= [2,3,1])) &
+      call abort_run('unexpected cuDecomp y-pencil memory order')
+    kx_lo = pya%lo(3); nkx = pya%shape(3)
+    if(pya%shape(2) /= nyA .or. pya%lo(2) /= yA_lo .or. pyb%shape(2) /= nyA .or. pyb%shape(3) /= nkx &
+       .or. pyb%lo(3) /= kx_lo) call abort_run('inconsistent cuDecomp pencils (grids A and B)')
+    ! z-pencil, order (1,2,3)
+    if(any(pzb%order(:) /= [1,2,3])) call abort_run('unexpected cuDecomp z-pencil memory order')
+    if(pzb%lo(1) /= kx_lo .or. pzb%shape(1) /= nkx) call abort_run('inconsistent cuDecomp z-pencil')
+    kz_lo = pzb%lo(2); nkz = pzb%shape(2)
+    cx1 = -1; cx2 = -1
+    !
+    istat = cudecompGetTransposeWorkspaceSize(ch,gd_a,wsa)
+    istat = cudecompGetTransposeWorkspaceSize(ch,gd_b,wsb)
+    wsize = max(wsa,wsb)
+    allocate(work(wsize))
+    istat = cudecompMalloc(ch,gd_a,work_d,wsize)
+    call acc_map_data(work,work_d,wsize*16_i8)
+  end subroutine init_cudecomp
+#endif
+  !
+  subroutine finalize_decomp
+    implicit none
+#if defined(_USE_CUDECOMP)
+    integer :: istat
+    call acc_unmap_data(work)
+    istat = cudecompFree(ch,gd_a,work_d)
+    istat = cudecompGridDescDestroy(ch,gd_a)
+    istat = cudecompGridDescDestroy(ch,gd_b)
+    istat = cudecompFinalize(ch)
+#endif
+  end subroutine finalize_decomp
+  !
+  ! ---------------------------------------------------------------------------
+  ! transposes
+  ! ---------------------------------------------------------------------------
+  !
+  subroutine tr_xa2ya(xa,ya)
+    implicit none
+    complex(rp), intent(in ) :: xa(nxh,nzA,nyA)
+    complex(rp), intent(out) :: ya(mz,nyA,nkx)
+#if defined(_USE_CUDECOMP)
+    integer :: istat
+    !$acc host_data use_device(xa,ya,work)
+    istat = cudecompTransposeXToY(ch,gd_a,xa,ya,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+    !$acc end host_data
+#else
+    integer :: i,j,k,p
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do k=1,nyA
+      do j=1,nzA
+        do i=1,nxh
+          p = own_kx(i)
+          sbuf(sd_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1))) = xa(i,j,k)
+        end do
+      end do
+    end do
+    call alltoallv(sbuf,sc_xy,sd_xy,rbuf,rc_xy,rd_xy,comm_row)
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do i=1,nkx
+      do k=1,nyA
+        do j=1,mz
+          p = own_z(j)
+          ya(j,k,i) = rbuf(rd_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1)))
+        end do
+      end do
+    end do
+#endif
+  end subroutine tr_xa2ya
+  !
+  subroutine tr_ya2xa(ya,xa)
+    implicit none
+    complex(rp), intent(in ) :: ya(mz,nyA,nkx)
+    complex(rp), intent(out) :: xa(nxh,nzA,nyA)
+#if defined(_USE_CUDECOMP)
+    integer :: istat
+    !$acc host_data use_device(xa,ya,work)
+    istat = cudecompTransposeYToX(ch,gd_a,ya,xa,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+    !$acc end host_data
+#else
+    integer :: i,j,k,p
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do i=1,nkx
+      do k=1,nyA
+        do j=1,mz
+          p = own_z(j)
+          rbuf(rd_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1))) = ya(j,k,i)
+        end do
+      end do
+    end do
+    call alltoallv(rbuf,rc_xy,rd_xy,sbuf,sc_xy,sd_xy,comm_row)
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do k=1,nyA
+      do j=1,nzA
+        do i=1,nxh
+          p = own_kx(i)
+          xa(i,j,k) = sbuf(sd_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1)))
+        end do
+      end do
+    end do
+#endif
+  end subroutine tr_ya2xa
+  !
+  subroutine tr_yb2zb(yb,zb)
+    implicit none
+    complex(rp), intent(in ) :: yb(nz,nyA,nkx)
+    complex(rp), intent(out) :: zb(nkx,nkz,ny)
+#if defined(_USE_CUDECOMP)
+    integer :: istat
+    !$acc host_data use_device(yb,zb,work)
+    istat = cudecompTransposeYToZ(ch,gd_b,yb,zb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+    !$acc end host_data
+#else
+    integer :: i,j,k,p
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do i=1,nkx
+      do k=1,nyA
+        do j=1,nz
+          p = own_kz(j)
+          sbuf(sd_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1))) = yb(j,k,i)
+        end do
+      end do
+    end do
+    call alltoallv(sbuf,sc_yz,sd_yz,rbuf,rc_yz,rd_yz,comm_col)
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do k=1,ny
+      do j=1,nkz
+        do i=1,nkx
+          p = own_y(k)
+          zb(i,j,k) = rbuf(rd_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p))))
+        end do
+      end do
+    end do
+#endif
+  end subroutine tr_yb2zb
+  !
+  subroutine tr_zb2yb(zb,yb)
+    implicit none
+    complex(rp), intent(in ) :: zb(nkx,nkz,ny)
+    complex(rp), intent(out) :: yb(nz,nyA,nkx)
+#if defined(_USE_CUDECOMP)
+    integer :: istat
+    !$acc host_data use_device(yb,zb,work)
+    istat = cudecompTransposeZToY(ch,gd_b,zb,yb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+    !$acc end host_data
+#else
+    integer :: i,j,k,p
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do k=1,ny
+      do j=1,nkz
+        do i=1,nkx
+          p = own_y(k)
+          rbuf(rd_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p)))) = zb(i,j,k)
+        end do
+      end do
+    end do
+    call alltoallv(rbuf,rc_yz,rd_yz,sbuf,sc_yz,sd_yz,comm_col)
+    !$acc parallel loop collapse(3) default(present) private(p) async(1)
+    do i=1,nkx
+      do k=1,nyA
+        do j=1,nz
+          p = own_kz(j)
+          yb(j,k,i) = sbuf(sd_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1)))
+        end do
+      end do
+    end do
+#endif
+  end subroutine tr_zb2yb
+  !
+#if !defined(_USE_CUDECOMP)
+  subroutine alltoallv(sb,sc,sd,rb,rc,rd,comm)
+    implicit none
+    complex(rp), intent(inout) :: sb(:),rb(:)
+    integer, intent(in) :: sc(:),sd(:),rc(:),rd(:),comm
+    integer :: ierr
+    !$acc wait(1)
+    !$acc host_data use_device(sb,rb)
+    call MPI_ALLTOALLV(sb,sc,sd,MPI_DOUBLE_COMPLEX,rb,rc,rd,MPI_DOUBLE_COMPLEX,comm,ierr)
+    !$acc end host_data
+  end subroutine alltoallv
+#endif
+end module mod_decomp

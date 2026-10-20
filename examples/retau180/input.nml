@@ -1,0 +1,11 @@
+! turbulent channel, Re_tau ~ 180 (Re_b = U_b h/nu = 2800, constant flow rate), box 4pi x 4pi/3 (Moser et al. 1999)
+! dx+ = 17.7, dz+ = 5.9 (before dealiasing), dy+ = 0.86 (wall) ... 4.7 (centre)
+! scalars: (1) Pr = 0.71, S = +1/-1 at the walls; (2) Pr = 0.71, uniform-heat-flux type (source u/U_b, S = 0 at walls)
+&grid nx=128, ny=129, nz=128, lx=12.566370614359172, lz=4.1887902047863905, grid_type='tanh', grid_alpha=3.0, fd_order=6 /
+&physics re=2800., forcing='cfr', ubulk=1.0, nl_form='rotational', visc_theta=0.0 /   ! visc_theta=0.5 -> implicit (Appendix B.2)
+&time nstep=200000, tmax=1500., wall_time_max=85000., cfl=1.2, cfl_visc=1.5 /
+&init init_type='noise', init_amp=0.25 /
+&output data_dir='data', iout_log=100, iout_stats=20, iout_save_stats=5000, iout_restart=10000, iout_field=0, tstats_start=300. /
+&scalars nscal=2, pr=0.71,0.71, scal_theta=0.5,0.5, sbc_bot='D','D', sbc_top='D','D', sval_bot=1.,0., sval_top=-1.,0.,
+ ssrc_u=0.,1., sinit='linear','zero' /
+&parallel pdims=0,0, cudecomp_t_backend=0, cudecomp_enable_nccl=.true., cudecomp_enable_nvshmem=.false. /

@@ -1,0 +1,5 @@
+build/
+dependencies/
+data/
+*.o
+*.mod
