@@ -38,7 +38,8 @@ src/main.f90       main program
 configs/           machine settings (arrhenius.mk, generic_gpu.mk)
 examples/          ts_wave (paper Sec. 5.1, with check.py), scalar_check (exact laminar scalar solutions),
                    retau180, retau395 (paper Sec. 5.3 set-up, with two scalars), arrhenius_job.sh
-tools/             build_cudecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units)
+tools/             build_cudecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units),
+                   restart_slices.py (2D slices from a restart file -> .mat), plot_slices.m (MATLAB/Octave)
 ```
 
 ## The numerical method in brief
@@ -226,6 +227,27 @@ seconds and check the GPU results against known values.
 * `restart.bin` / `restart.hdr`: spectral fields (global `(nx/2, nz, ny)` complex arrays), independent of the
   number of ranks.
 * `fld_NNNNNNN_*.bin` + `.xmf`: physical fields on the dealiased grid, readable with ParaView/VisIt.
+
+## 2D slices for MATLAB
+
+`tools/restart_slices.py` reads `restart.hdr`/`restart.bin` and evaluates the Fourier series exactly, optionally
+on a finer x–z grid. It writes xz-, xy- and yz-slices of u, v, w and all scalars to a MATLAB `.mat` file. It
+reads the restart file through a memory map, one y-plane at a time, so large restart files are not loaded into
+memory at once. `tools/plot_slices.m` plots them; it runs in MATLAB and GNU Octave.
+
+```
+python3 tools/restart_slices.py data/restart --yplus 15 --re 2800 --utau 0.0647 --z 1.0 --x 3.0 \
+        --upsample 2 --fluct -o slices.mat          # or --y -0.9 0 (outer units); needs numpy, scipy
+```
+```matlab
+addpath tools
+plot_slices('slices.mat')                         % all fields
+plot_slices('slices.mat', {'u','s1'}, 'save', true, 'clim', [-0.3 0.3])
+S = load('slices.mat');   % x, y, z, xz_u (Nz x Nx x n_y), xy_u (ny x Nx), yz_u (ny x Nz), ...
+```
+
+With `--upsample 1.5` the slices coincide with the code's own 3D field output (dealiased grid); the two agree to
+round-off (≤ 1e-15).
 
 ## What was taken from CaNS (and CaNS-EIGEN)
 
