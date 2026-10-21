@@ -190,6 +190,12 @@ and the input namelist only once. If the log says `No PMIx server was reachable 
 the launcher does not match the MPI library: use `srun --mpi=pmix` or the `mpirun` of the MPI that HiCHAN was
 built with (HiCHAN then also prints a warning).
 
+**NCCL:** if the log shows `NET/OFI Couldn't create domain ... Function not implemented` and `Failed to
+initialize any NET plugin` (then `cudecomp.cc:69 NCCL error (error code 5)`), NCCL's libfabric network plugin
+does not work in the job environment. On one node set `NCCL_NET_PLUGIN=none` and `NCCL_NET=Socket`
+(the GPUs communicate over NVLink); otherwise set `cudecomp_enable_nccl = .false.` or fix the plugin
+configuration (see `examples/arrhenius_job.sh`).
+
 Run time: `export LD_LIBRARY_PATH=$PWD/dependencies/cuDecomp/build/lib:$LD_LIBRARY_PATH`, one MPI rank per GPU
 (4 per Arrhenius node). The process grid and the communication backend are autotuned by cuDecomp when
 `pdims = 0,0` and `cudecomp_t_backend = 0`. See `examples/arrhenius_job.sh`.

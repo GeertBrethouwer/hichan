@@ -23,8 +23,15 @@ export OMP_NUM_THREADS=1
 export MPICH_GPU_SUPPORT_ENABLED=1                   # Cray MPICH
 export UCX_MEMTYPE_CACHE=n                           # Open MPI / UCX
 export NCCL_DEBUG=WARN                               # NCCL prints the reason if it fails
-# NCCL over the node interconnect (Slingshot): uncomment if NCCL backends are selected by the autotuner
-#export NCCL_NET="AWS Libfabric"
+# NCCL's libfabric (OFI) network plugin fails on Arrhenius with "NET/OFI Couldn't create domain ...
+# Function not implemented" -> "Failed to initialize any NET plugin" -> ncclCommInitRank error 5.
+# Single node: NCCL uses NVLink between the GPUs and does not need the plugin, so disable it:
+export NCCL_NET_PLUGIN=none
+export NCCL_NET=Socket
+# Multi-node: NCCL needs a working OFI plugin for Slingshot (ask NSC which one; typically
+# FI_PROVIDER=cxi, NCCL_NET="AWS Libfabric", NCCL_CROSS_NIC=1), or set cudecomp_enable_nccl = .false.
+# in &parallel to use cuDecomp's (CUDA-aware) MPI backends only.
+env | grep -E '^(NCCL|FI)_' | sort
 
 cd $SLURM_SUBMIT_DIR
 # The MPI of the NVIDIA HPC SDK (Open MPI/HPC-X) needs PMIx. With a plain srun/mpprun the tasks
