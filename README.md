@@ -16,6 +16,8 @@ HiCHAN solves the incompressible Navier–Stokes equations in a plane channel, t
   `visc_theta = 0`, the default and the variant the paper recommends for channel flow, Sec. 6) or implicit with
   the θ-method (Appendix B.2, `visc_theta > 0`, e.g. 0.5 = Crank–Nicolson). Scalar diffusion uses the same
   θ-method (`scal_theta`, default 0.5), or explicit RK3 when θ = 0.
+* **Scalars:** up to 16 passive or active scalars. Active scalars act on the flow through a Boussinesq
+  buoyancy term, with gravity in an arbitrary direction.
 * **Parallelisation:** 2D pencil decomposition with MPI. On GPUs it uses OpenACC, cuFFT and NVIDIA **cuDecomp**
   (autotuned process grid and NCCL/NVSHMEM/MPI transposes). That design is taken from
   [CaNS](https://github.com/CaNS-World/CaNS) v4.2.0 (see *What was taken from CaNS* below).
@@ -36,8 +38,9 @@ src/io.f90         restart files (MPI-IO), 3D fields (MPI-IO + XDMF)
 src/initflow.f90   initial conditions
 src/main.f90       main program
 configs/           machine settings (arrhenius.mk, generic_gpu.mk)
-examples/          ts_wave (paper Sec. 5.1, with check.py), scalar_check (exact laminar scalar solutions),
-                   retau180, retau395 (paper Sec. 5.3 set-up, with two scalars), arrhenius_job.sh
+examples/          input_reference.nml (every input item, commented), ts_wave (paper Sec. 5.1, check.py),
+                   scalar_check (exact laminar scalar solutions), rayleigh_benard and vertical_channel
+                   (active scalars, check.py), retau180, retau395 (paper Sec. 5.3), arrhenius_job.sh
 tools/             build_cudecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units),
                    restart_slices.py (2D slices from a restart file -> .mat), plot_slices.m (MATLAB/Octave)
 ```
@@ -136,6 +139,24 @@ Each scalar adds 4 FFTs and uses the advective form. The time step comes from th
 `cfl` (< √3) and explicit diffusion `cfl_visc` (< 2.51). The spectral radius of `D2` is computed numerically on
 the actual grid.
 
+**Active scalars (Boussinesq).** Each scalar can act on the flow through the buoyancy term
+
+```
+du/dt + ... = ... - sum_n ri(n) * s_n * e_g ,       e_g = gravity/|gravity|
+```
+
+`gravity` is the direction in which gravity acts and may point in any direction: (0,−1,0) for a horizontal
+channel, (−1,0,0) for a vertical channel with upward flow, or oblique. `ri(n) = g β ΔT_ref h/U_ref²` is the
+Richardson number of scalar n; it is positive for a scalar that makes the fluid lighter, such as temperature, and
+negative for one that makes it heavier, such as salinity. `ri(n) = 0` keeps the scalar passive. Between the walls
+(gap 2h, scalar difference Δs), the Rayleigh number is `Ra = 8 ri Δs re² pr`.
+
+The term is linear in the scalars, so it is added exactly in spectral space, explicitly with the RK3 weights and
+using the scalar at the current stage. Its mean part is taken up by the hydrostatic pressure (wall-normal
+component) or drives the mean flow (streamwise and spanwise components; the CFR correction acts on the
+streamwise part). The time step also respects the internal-gravity-wave limit `Δt ≤ cfl/N`, with
+`N² = |ri| max|dS/dy|` from the mean stratification.
+
 **Forcing.** Constant flow rate (`cfr`, exact correction of the mean flow, which is valid for explicit viscous
 terms) or constant pressure gradient (`cpg`).
 
@@ -164,6 +185,9 @@ terms) or constant pressure gradient (`cpg`).
 | Implicit, Δt = 0.02 and 0.05 (explicit viscous limit ≈ 0.006) | stable. Error 2.1e-8 → 1.4e-7 for θ = 0.5 (2nd order); 6.4e-5 → 1.7e-4 for θ = 1 (1st order); 8–13 iterations to 1e-13 |
 | Implicit, laminar CFR / 1–4 ranks / OpenACC build | −dp/dx = 3/Re exactly; results independent of the decomposition; OpenACC host-fallback build identical |
 | Implicit, turbulent channel (restart from the coarse Re_τ = 180 field) | stable, 6 iterations per substep, divergence ~5e-14. On this coarse CPU case an implicit step costs ≈ 1.6× an explicit one; there Δt is set by the advective CFL, so implicit pays off only when the viscous limit binds (fine near-wall spacing, low Re, low Pr) |
+| Buoyancy, natural convection in a vertical channel (`examples/vertical_channel`) | gravity along −x, −z and oblique (−0.6, 0, −0.8): steady profile u = ri·re·(y³−y)/6 (projected on gravity) reproduced to 1.6e-6 (the residual start-up transient), v = 0 exactly |
+| Buoyancy, onset of Rayleigh–Bénard convection (`examples/rayleigh_benard`) | growth rate changes sign at **Ra_c = 1707.78** (linear theory 1707.76), at k d = 3.117 |
+| Buoyancy, 3D with oblique gravity, two active scalars | same results on 1, 3 and 4 ranks and with the OpenACC build |
 | Restart | 20 steps straight vs. 10 + restart + 10 (restarting on 3 instead of 2 ranks): bit-identical |
 | OpenACC code path | built with `gfortran -fopenacc` (host fallback), with cuFFT emulated by FFTW using the same layout parameters: results identical to the CPU build |
 
@@ -208,14 +232,20 @@ seconds and check the GPU results against known values.
 
 ## Input (`input.nml`)
 
-| namelist | parameters |
+**`examples/input_reference.nml`** lists every input item with its meaning, units and default value. Copy it as
+the starting point for a new case. The input consists of Fortran namelists, one group per topic. `!` starts a
+comment, items that are not given keep their defaults, and per-scalar items are written per index
+(`pr(2) = 0.71`). At start-up HiCHAN prints a summary of the set-up.
+
+| namelist | contents |
 |---|---|
 | `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `dealias` |
-| `&physics` | `re` (U h/ν, h = half height), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `nl_form` (`rotational`, default / `advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit θ-method, B.2), `impl_maxit` (default 10), `impl_tol` (default 1e-12) |
-| `&time` | `nstep`, `tmax`, `wall_time_max` (s), `dt`, `fixed_dt`, `cfl`, `cfl_visc` |
-| `&init` | `init_type` (`laminar`/`noise`/`mode`/`restart`), `init_amp` (rms of the noise relative to `ubulk`), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
+| `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
+| `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt`, `dt_max`, `cfl`, `cfl_visc` |
+| `&init` | `init_type` (`laminar`/`noise`/`mode`/`restart`), `init_amp`, `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz` |
-| `&scalars` | `nscal`, and per scalar: `pr`, `scal_theta`, `sbc_bot`/`sbc_top` (`D`/`N`), `sval_bot`/`sval_top` (wall value or gradient), `ssrc_const` (source), `ssrc_u` (source ∝ u/ubulk, e.g. the mixed-type thermal BC), `sinit` (`linear`/`zero`/`noise`) |
+| `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)` |
+| `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
 | `&parallel` | `pdims`, `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
 
 ## Output (in `data_dir`)

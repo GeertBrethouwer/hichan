@@ -53,7 +53,7 @@ contains
     complex(rp), intent(inout) :: u(nkx,nkz,ny),v(nkx,nkz,ny),w(nkx,nkz,ny)
     complex(rp), intent(inout), contiguous :: s(:,:,:,:)
     integer :: i,j,k,n,ig,jg,mxx,mzz,iunit,ios,mmax_x,mmax_z
-    real(rp) :: y,amp,ulam,e,fac
+    real(rp) :: y,amp,ulam,e,fac,uref
     real(rp) :: ur,ui,vr,vi,wr,wi
     complex(rp), allocatable :: mode(:,:)
     u(:,:,:) = 0; v(:,:,:) = 0; w(:,:,:) = 0; s(:,:,:,:) = 0
@@ -92,10 +92,13 @@ contains
         end do
       end do
       !
-      ! rescale: rms of the velocity fluctuations = init_amp*ubulk (init_amp*ulam*2/3 for 'cpg')
+      ! rescale: rms of the velocity fluctuations = init_amp*U_b, with U_b the laminar bulk velocity
+      ! (2/3 of the centreline value), or the velocity unit if there is no mean flow (e.g. convection)
       !
       call fluct_energy(u,v,w,e)
-      fac = init_amp*(2._rp/3._rp)*ulam/sqrt(max(e,tiny(1._rp)))
+      uref = (2._rp/3._rp)*abs(ulam)
+      if(uref == 0._rp) uref = 1._rp
+      fac = init_amp*uref/sqrt(max(e,tiny(1._rp)))
       do k=1,ny
         do j=1,nkz
           do i=1,nkx

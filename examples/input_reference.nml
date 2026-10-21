@@ -1,0 +1,152 @@
+!======================================================================================================
+!  HiCHAN input file  (read from ./input.nml)
+!
+!  * Fortran namelists, one group per topic:
+!      &grid  &physics  &time  &init  &output  &scalars  &buoyancy  &parallel
+!  * '!' starts a comment. Items that are not given keep their default value, shown as [default].
+!  * Units: lengths in channel half-heights h (walls at y = -1 and y = +1), velocities in U_ref
+!    (the bulk velocity U_b for forcing = 'cfr'), time in h/U_ref.
+!  * Per-scalar items are arrays: write them per scalar, e.g.  pr(1) = 0.71,  ri(2) = -0.1
+!  * Coordinates: x streamwise, y wall-normal, z spanwise.
+!
+!  This reference file sets up a turbulent channel at Re_tau ~ 180 with one passive and one active
+!  (buoyant) scalar; every available input item is listed.
+!======================================================================================================
+
+!------------------------------------------------------------------------------------------------------
+&grid                                  ! computational box and discretisation
+!------------------------------------------------------------------------------------------------------
+  nx         = 128                     ! Fourier modes in x (even)                                   [64]
+  nz         = 128                     ! Fourier modes in z (even)                                   [64]
+  ny         = 129                     ! grid points in y, walls included                            [65]
+  lx         = 12.566370614359172      ! box length in x (here 4*pi)                                 [2*pi]
+  lz         = 4.1887902047863905      ! box width in z (here 4*pi/3)                                [pi]
+  grid_type  = 'tanh'                  ! y-grid: 'tanh' (clustered at the walls, Eq. 41 of the       ['tanh']
+                                       !   paper), 'uniform', or 'file' (read from grid_file)
+  grid_alpha = 3.0                     ! tanh stretching alpha_s: larger -> finer at the walls        [2.0]
+  grid_file  = 'grid.in'               ! ny values of y in [-1,1], one per line (grid_type='file')    ['grid.in']
+  fd_order   = 6                       ! compact scheme: 4 = (3-4-3), 6 = (3-5-6-5-3)                 [6]
+  dealias    = .true.                  ! 3/2-rule dealiasing of the nonlinear terms in x and z        [.true.]
+/
+
+!------------------------------------------------------------------------------------------------------
+&physics                               ! flow parameters and numerical treatment of the momentum eq.
+!------------------------------------------------------------------------------------------------------
+  re         = 2800.                   ! Reynolds number U_ref h / nu                                 [2800]
+                                       !   (Re_b = 2800 gives Re_tau ~ 180; Re_b = 6875 Re_tau ~ 395)
+  forcing    = 'cfr'                   ! 'cfr': constant flow rate (bulk velocity = ubulk)            ['cfr']
+                                       ! 'cpg': constant pressure gradient (-dp/dx = dpdx)
+  ubulk      = 1.0                     ! bulk velocity for 'cfr'                                      [1.0]
+  dpdx       = 0.0                     ! -dp/dx for 'cpg' (1.0 with re = Re_tau: wall units)           [0.0]
+  nl_form    = 'rotational'            ! nonlinear term: 'rotational' (u x omega, energy conserving,  ['rotational']
+                                       !   9 FFTs) or 'advective' (as in the paper, 15 FFTs)
+  visc_theta = 0.0                     ! viscous term: 0 = explicit (App. B.1); >0 = implicit theta-  [0.0]
+                                       !   method (App. B.2), 0.5 = Crank-Nicolson, 1 = backward Euler
+  impl_maxit = 10                      ! implicit only: max. iterations of the velocity-pressure      [10]
+                                       !   coupling per RK substep
+  impl_tol   = 1.e-12                  ! implicit only: stop when max|v^{m+1}-v^m| < impl_tol*max|v|  [1e-12]
+/
+
+!------------------------------------------------------------------------------------------------------
+&time                                  ! time integration (low-storage RK3)
+!------------------------------------------------------------------------------------------------------
+  nstep         = 200000               ! maximum number of time steps                                 [1000]
+  tmax          = 1500.                ! stop when this simulation time is reached                    [huge]
+  wall_time_max = 85000.               ! stop (writing a restart file) after this wall-clock time [s] [huge]
+  fixed_dt      = .false.              ! .true.: constant dt; .false.: adaptive dt from cfl, cfl_visc [.false.]
+  dt            = 1.e-3                ! time step if fixed_dt, otherwise the first time step         [1e-3]
+  dt_max        = 1.0                  ! upper bound of the adaptive time step                        [1.0]
+  cfl           = 1.2                  ! advective CFL number (RK3 stable up to sqrt(3) = 1.73); also  [1.0]
+                                       !   used for the internal-gravity-wave limit (active scalars)
+  cfl_visc      = 1.5                  ! explicit-diffusion limit (RK3 stable up to 2.51); not used   [1.5]
+                                       !   for terms treated with theta >= 1/2
+/
+
+!------------------------------------------------------------------------------------------------------
+&init                                  ! initial condition
+!------------------------------------------------------------------------------------------------------
+  init_type    = 'noise'               ! 'laminar' : laminar Poiseuille profile                       ['laminar']
+                                       ! 'noise'   : laminar + random divergence-free perturbations
+                                       ! 'mode'    : laminar + one Fourier mode read from mode_file
+                                       ! 'restart' : continue from restart_file
+  init_amp     = 0.25                  ! 'noise': rms of the perturbations / U_b (velocity unit if    [0.1]
+                                       !   there is no mean flow); 'mode': amplitude of the mode
+  init_seed    = 1                     ! seed of the (decomposition-independent) random numbers       [1]
+  mode_file    = 'mode.in'             ! 'mode': ny lines Re(u) Im(u) Re(v) Im(v) Re(w) Im(w)          ['mode.in']
+                                       !   (e.g. from tools/os_mode.py)
+  mode_kx      = 1                     ! 'mode': streamwise mode index (kx = 2 pi mode_kx / lx)       [1]
+  mode_kz      = 0                     ! 'mode': spanwise mode index                                   [0]
+  restart_file = 'data/restart'        ! 'restart': file name without extension (.bin/.hdr)           ['restart']
+  reset_time   = .false.               ! 'restart': start again from t = 0, step 0                    [.false.]
+/
+
+!------------------------------------------------------------------------------------------------------
+&output                                ! output (all files in data_dir)
+!------------------------------------------------------------------------------------------------------
+  data_dir        = 'data'             ! output directory (created if missing)                        ['data']
+  iout_log        = 100                ! write a line to log.dat every iout_log steps                 [10]
+  iout_stats      = 20                 ! accumulate statistics every iout_stats steps (0: never)      [10]
+  iout_save_stats = 5000               ! write the averaged profiles stats.dat every ... steps        [1000]
+  iout_restart    = 10000              ! write restart.bin/.hdr every ... steps (and at the end)      [5000]
+  iout_field      = 0                  ! write 3D physical fields (+ .xmf for ParaView) every ...     [0]
+                                       !   steps (0: never)
+  tstats_start    = 300.               ! start averaging statistics at this time                      [0.0]
+  mode_log_kx     = -1                 ! log the energy of Fourier mode (mode_log_kx, mode_log_kz)    [-1]
+  mode_log_kz     = 0                  !   in log.dat (-1: off)                                       [0]
+/
+
+!------------------------------------------------------------------------------------------------------
+&scalars                               ! scalar transport  ds/dt + u.grad(s) = 1/(re pr) lap(s) + Q
+!------------------------------------------------------------------------------------------------------
+  nscal = 2                            ! number of scalars (0..16)                                    [0]
+  !
+  ! scalar 1: passive temperature-like scalar, s = +1 at the bottom wall, -1 at the top wall
+  pr(1)         = 0.71                 ! Prandtl/Schmidt number                                       [1.0]
+  scal_theta(1) = 0.5                  ! diffusion: 0 = explicit RK3, >0 theta-method (0.5 = CN)       [0.5]
+  sbc_bot(1)    = 'D'                  ! bottom wall (y=-1): 'D' Dirichlet (value) or 'N' Neumann      ['D']
+  sval_bot(1)   = 1.0                  !   value (D) or wall-normal gradient ds/dy (N)                [1.0]
+  sbc_top(1)    = 'D'                  ! top wall (y=+1): 'D' or 'N'                                   ['D']
+  sval_top(1)   = -1.0                 !   value (D) or ds/dy (N)                                     [-1.0]
+  ssrc_const(1) = 0.0                  ! uniform volumetric source Q_c                                [0.0]
+  ssrc_u(1)     = 0.0                  ! source Q_u * u/ubulk (e.g. uniform heat flux, mixed BC)      [0.0]
+  sinit(1)      = 'linear'             ! initial profile: 'linear' (between the Dirichlet values),    ['linear']
+                                       !   'zero', or 'noise' (linear + perturbations)
+  !
+  ! scalar 2: active scalar (see &buoyancy), stably stratified for gravity along -y
+  pr(2)         = 0.71
+  scal_theta(2) = 0.5
+  sbc_bot(2)    = 'D'
+  sval_bot(2)   = -0.5
+  sbc_top(2)    = 'D'
+  sval_top(2)   = 0.5
+  ssrc_const(2) = 0.0
+  ssrc_u(2)     = 0.0
+  sinit(2)      = 'linear'
+/
+
+!------------------------------------------------------------------------------------------------------
+&buoyancy                              ! active scalars, Boussinesq approximation:
+                                       !   momentum source  f = - sum_n ri(n) * s_n * e_g
+!------------------------------------------------------------------------------------------------------
+                                       ! e_g = gravity/|gravity| is the direction in which gravity
+                                       ! acts. With ri > 0 a larger s means lighter fluid (s =
+                                       ! temperature: ri = g beta dT_ref h / U_ref^2); use ri < 0 for
+                                       ! a scalar that makes the fluid heavier (e.g. salinity).
+                                       ! Rayleigh number between the walls (gap 2h, s difference ds):
+                                       !   Ra = ri * ds * 8 * re^2 * pr   (Ra_c = 1707.8 for gravity -y)
+  gravity = 0.0, -1.0, 0.0             ! direction of gravity (x,y,z), any orientation, normalised    [0,-1,0]
+                                       !   (0,-1,0): horizontal channel; (-1,0,0): vertical channel
+  ri(1)   = 0.0                        ! Richardson number of scalar 1 (0 = passive)                  [0.0]
+  ri(2)   = 0.05                       ! Richardson number of scalar 2                                [0.0]
+/
+
+!------------------------------------------------------------------------------------------------------
+&parallel                              ! domain decomposition and GPU communication
+!------------------------------------------------------------------------------------------------------
+  pdims                   = 0, 0       ! process grid p1 x p2 (0,0: automatic / cuDecomp autotuning)   [0,0]
+  cudecomp_t_backend      = 0          ! GPU transposes: 0 = autotune, otherwise a cuDecomp backend   [0]
+                                       !   (1 MPI_P2P, 2 MPI_P2P_PL, 3 MPI_A2A, 4 NCCL, 5 NCCL_PL,
+                                       !    6 NVSHMEM, 7 NVSHMEM_PL, 8 NVSHMEM_SM)
+  cudecomp_enable_nccl    = .true.     ! allow NCCL backends in the autotuning                        [.true.]
+  cudecomp_enable_nvshmem = .false.    ! allow NVSHMEM backends (cuDecomp built with NVSHMEM=1)        [.false.]
+/

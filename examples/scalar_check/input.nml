@@ -1,15 +1,37 @@
-! laminar Poiseuille flow with five passive scalars; steady exact solutions (check data/stats.dat):
-!   S1, S2 : uniform source 1, S = 0 at the walls  ->  S = Re*Pr/2 (1 - y^2) = 2.5 (1 - y^2)
-!   S3, S4 : dS/dy = 0.5 at y = -1, S = 0 at y = 1 ->  S = 0.5 (y - 1)
-!   S5     : dS/dy = 0.2 at both walls             ->  S = 0.2 y
-! S1, S3 implicit (Crank-Nicolson), S2, S4 explicit RK3, S5 fully implicit (theta = 1).
-! The log (data/log.dat) shows the wall gradients (last 10 columns): -5,5 | -5,5 | 0.5,0.5 | 0.5,0.5 | 0.2,0.2
-&grid nx=4, ny=33, nz=4, lx=6.283185307179586, lz=3.141592653589793, grid_type='tanh', grid_alpha=2.0, fd_order=6 /
-&physics re=100., forcing='cfr', ubulk=1.0 /
-&time nstep=10000000, tmax=400., cfl=1.0, cfl_visc=1.5 /
-&init init_type='laminar' /
-&output iout_log=2000, iout_stats=10, iout_save_stats=100000, iout_restart=0, tstats_start=390. /
-&scalars nscal=5, pr=0.05,0.05,0.05,0.05,0.1, scal_theta=0.5,0.0,0.5,0.0,1.0,
- sbc_bot='D','D','N','N','N', sbc_top='D','D','D','D','N', sval_bot=0.,0.,0.5,0.5,0.2, sval_top=0.,0.,0.,0.,0.2,
- ssrc_const=1.,1.,0.,0.,0., ssrc_u=0.,0.,0.,0.,0., sinit='zero','zero','zero','zero','zero' /
-&parallel pdims=0,0 /
+!======================================================================================================
+!  Laminar Poiseuille flow with five passive scalars; steady exact solutions (see data/stats.dat):
+!    S1, S2 : uniform source 1, S = 0 at the walls   ->  S = re*pr/2 (1 - y^2) = 2.5 (1 - y^2)
+!    S3, S4 : dS/dy = 0.5 at y = -1, S = 0 at y = 1  ->  S = 0.5 (y - 1)
+!    S5     : dS/dy = 0.2 at both walls              ->  S = 0.2 y
+!  S1, S3 Crank-Nicolson, S2, S4 explicit RK3, S5 backward Euler (theta = 1).
+!  data/log.dat, last 10 columns (wall gradients): -5,5 | -5,5 | 0.5,0.5 | 0.5,0.5 | 0.2,0.2
+!======================================================================================================
+&grid
+  nx = 4, nz = 4, ny = 33, lx = 6.283185307179586, lz = 3.141592653589793
+  grid_type = 'tanh', grid_alpha = 2.0, fd_order = 6
+/
+&physics
+  re = 100., forcing = 'cfr', ubulk = 1.0
+/
+&time
+  nstep = 10000000, tmax = 400., cfl = 1.0, cfl_visc = 1.5
+/
+&init
+  init_type = 'laminar'
+/
+&output
+  iout_log = 2000, iout_stats = 10, iout_save_stats = 100000, iout_restart = 0, tstats_start = 390.
+/
+&scalars
+  nscal = 5
+  pr(1) = 0.05, scal_theta(1) = 0.5, sbc_bot(1) = 'D', sval_bot(1) = 0.0, sbc_top(1) = 'D', sval_top(1) = 0.0
+  ssrc_const(1) = 1.0, sinit(1) = 'zero'
+  pr(2) = 0.05, scal_theta(2) = 0.0, sbc_bot(2) = 'D', sval_bot(2) = 0.0, sbc_top(2) = 'D', sval_top(2) = 0.0
+  ssrc_const(2) = 1.0, sinit(2) = 'zero'
+  pr(3) = 0.05, scal_theta(3) = 0.5, sbc_bot(3) = 'N', sval_bot(3) = 0.5, sbc_top(3) = 'D', sval_top(3) = 0.0
+  sinit(3) = 'zero'
+  pr(4) = 0.05, scal_theta(4) = 0.0, sbc_bot(4) = 'N', sval_bot(4) = 0.5, sbc_top(4) = 'D', sval_top(4) = 0.0
+  sinit(4) = 'zero'
+  pr(5) = 0.1,  scal_theta(5) = 1.0, sbc_bot(5) = 'N', sval_bot(5) = 0.2, sbc_top(5) = 'N', sval_top(5) = 0.2
+  sinit(5) = 'zero'
+/

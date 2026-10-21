@@ -1,13 +1,32 @@
-! 2D Tollmien-Schlichting wave, Re = 5000 (centreline), alpha = 1.12 (Lenaers et al. 2014, Sec. 5.1)
-! prepare the initial mode:  python3 ../../tools/os_mode.py --re 5000 --alpha 1.12 --ny 65 --grid tanh --galpha 4.0 -o mode.in
-! expected: E_mode (column 10 of data/log.dat) ~ exp(2 omega_i t), omega_i = -2.7829e-3 (c_i = -2.4847e-3);
-! the fitted rate agrees with omega_i to ~1e-4 (relative) for fd_order = 6
-&grid nx=4, ny=65, nz=2, lx=5.609986881410345, lz=1.0, grid_type='tanh', grid_alpha=4.0, fd_order=6 /
-&physics re=5000., forcing='cfr', ubulk=0.6666666666666667, nl_form='advective' /
-&time nstep=1000000, tmax=30.0, dt=0.002, fixed_dt=.true. /
-&init init_type='mode', init_amp=1.e-6, mode_file='mode.in', mode_kx=1, mode_kz=0 /
-&output iout_log=250, iout_stats=0, iout_save_stats=0, iout_restart=0, mode_log_kx=1, mode_log_kz=0 /
-&scalars nscal=0 /
-&parallel pdims=0,0 /
-! implicit viscous terms (Appendix B.2): add  visc_theta=0.5  to &physics; dt can then exceed the explicit
-! viscous limit (~0.006 for this grid), e.g. dt=0.05 still gives omega_i to ~1e-7
+!======================================================================================================
+!  2D Tollmien-Schlichting wave, Re = 5000 (centreline velocity), alpha = 1.12
+!  (Lenaers et al. 2014, Sec. 5.1).
+!  1) initial mode:  python3 ../../tools/os_mode.py --re 5000 --alpha 1.12 --ny 65 --grid tanh --galpha 4.0 -o mode.in
+!  2) run, 3) python3 check.py : E_mode ~ exp(2 omega_i t), omega_i = -2.7829e-3 (c_i = -2.4847e-3)
+!  Implicit viscous terms (Appendix B.2): set visc_theta = 0.5; dt can then exceed the explicit
+!  viscous limit (~0.006 here), e.g. dt = 0.05 still gives omega_i to ~1e-7.
+!======================================================================================================
+&grid
+  nx = 4, nz = 2, ny = 65              ! one streamwise mode is enough (linear problem)
+  lx = 5.609986881410345, lz = 1.0     ! lx = 2 pi / 1.12
+  grid_type = 'tanh', grid_alpha = 4.0, fd_order = 6
+/
+&physics
+  re = 5000., forcing = 'cfr'
+  ubulk = 0.6666666666666667           ! laminar Poiseuille with centreline velocity 1
+  nl_form = 'advective', visc_theta = 0.0
+/
+&time
+  nstep = 1000000, tmax = 30.0, fixed_dt = .true., dt = 0.002
+/
+&init
+  init_type = 'mode', mode_file = 'mode.in', mode_kx = 1, mode_kz = 0
+  init_amp = 1.e-6                     ! small: linear regime
+/
+&output
+  iout_log = 250, iout_stats = 0, iout_save_stats = 0, iout_restart = 0
+  mode_log_kx = 1, mode_log_kz = 0     ! energy of the TS mode in column 10 of log.dat
+/
+&scalars
+  nscal = 0
+/

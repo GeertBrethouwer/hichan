@@ -1,0 +1,33 @@
+!======================================================================================================
+!  Natural convection in a vertical channel: gravity along -x (streamwise), walls at s = +1 / -1,
+!  no imposed pressure gradient. Exact steady (laminar) solution:
+!      s = -y ,   u = ri * re * (y^3 - y) / 6     (max |u| = 0.0642 ri re = 3.21 here)
+!  check.py compares data/stats.dat with it (HiCHAN: error ~1e-6, the decaying start-up transient).
+!  Try gravity = 0,0,-1 (profile appears in w) or any oblique direction.
+!======================================================================================================
+&grid
+  nx = 4, nz = 4, ny = 33, lx = 6.283185307179586, lz = 3.141592653589793
+  grid_type = 'tanh', grid_alpha = 2.0, fd_order = 6
+/
+&physics
+  re = 100., forcing = 'cpg', dpdx = 0.0
+  visc_theta = 0.5
+/
+&time
+  nstep = 10000000, tmax = 150., cfl = 1.0
+/
+&init
+  init_type = 'laminar'                ! fluid at rest (dpdx = 0)
+/
+&output
+  iout_log = 500, iout_stats = 10, iout_save_stats = 1000000, iout_restart = 0, tstats_start = 145.
+/
+&scalars
+  nscal = 1
+  pr(1) = 1.0, scal_theta(1) = 0.5
+  sbc_bot(1) = 'D', sval_bot(1) = 1.0, sbc_top(1) = 'D', sval_top(1) = -1.0, sinit(1) = 'linear'
+/
+&buoyancy
+  gravity = -1.0, 0.0, 0.0             ! vertical channel: gravity opposite to the x direction
+  ri(1)   = 0.5
+/

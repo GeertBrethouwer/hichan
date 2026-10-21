@@ -36,6 +36,7 @@ module mod_param
   real(rp) :: wall_time_max = huge(1._rp)  ! in seconds; the run stops (with a restart file) before this
   real(rp) :: dt    = 1.e-3_rp
   logical  :: fixed_dt = .false.
+  real(rp) :: dt_max = 1._rp                ! upper bound of the adaptive time step
   real(rp) :: cfl = 1.0_rp, cfl_visc = 1.5_rp ! RK3: |lambda dt| < sqrt(3) (imag.) and 2.51 (real)
   !
   ! &init
@@ -66,17 +67,24 @@ module mod_param
   real(rp) :: ssrc_u(nscal_max) = 0._rp          ! source  Q_u*u/ubulk (e.g. uniform-heat-flux channels)
   character(len=16) :: sinit(nscal_max) = 'linear' ! 'linear', 'zero', 'noise'
   !
+  ! &buoyancy (Boussinesq): momentum source  - sum_n ri(n) * s_n * e_g
+  !
+  real(rp) :: gravity(3) = [0._rp,-1._rp,0._rp]  ! direction of gravity (x,y,z), normalised internally
+  real(rp) :: ri(nscal_max) = 0._rp              ! Richardson number of scalar n (0 -> passive scalar)
+  !
   ! &parallel
   !
   integer :: pdims(2) = [0,0]              ! process grid (0,0 -> automatic / cuDecomp autotuning)
   integer :: cudecomp_t_backend = 0        ! 0 -> autotune, otherwise CUDECOMP_TRANSPOSE_COMM_* value
-  logical :: cudecomp_enable_nccl = .true., cudecomp_enable_nvshmem = .true.
+  logical :: cudecomp_enable_nccl = .true., cudecomp_enable_nvshmem = .false.
   !
   ! derived quantities
   !
   integer  :: nxh, mx, mz                  ! number of kx modes kept; physical (dealiased) grid sizes
   real(rp) :: visc
   real(rp) :: diff(nscal_max)
+  real(rp) :: gvec(3) = 0._rp              ! unit vector in the direction of gravity
+  logical  :: is_buoyant = .false.         ! at least one active scalar
   !
   ! low-storage RK3 coefficients (Table 1)
   !
@@ -90,11 +98,12 @@ contains
     integer :: iunit,ios
     namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
     namelist /physics/ re,forcing,ubulk,dpdx,nl_form,visc_theta,impl_maxit,impl_tol
-    namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,cfl,cfl_visc
+    namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
                       mode_log_kx,mode_log_kz
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit
+    namelist /buoyancy/ gravity,ri
     namelist /parallel/ pdims,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
     !
     open(newunit=iunit,file='input.nml',status='old',action='read',iostat=ios)
@@ -110,6 +119,8 @@ contains
     read(iunit,nml=output  ,iostat=ios); if(ios /= 0) call abort_run('error reading namelist &output')
     rewind(iunit)
     read(iunit,nml=scalars ,iostat=ios); if(ios > 0 ) call abort_run('error reading namelist &scalars')
+    rewind(iunit)
+    read(iunit,nml=buoyancy,iostat=ios); if(ios > 0 ) call abort_run('error reading namelist &buoyancy')
     rewind(iunit)
     read(iunit,nml=parallel,iostat=ios); if(ios > 0 ) call abort_run('error reading namelist &parallel')
     close(iunit)
@@ -132,15 +143,55 @@ contains
     end if
     visc = 1._rp/re
     diff(:) = visc/pr(:)
-    if(myid == 0) then
-      write(*,nml=grid)
-      write(*,nml=physics)
-      write(*,nml=time)
-      write(*,nml=init)
-      write(*,nml=output)
-      write(*,nml=scalars)
-      write(*,nml=parallel)
+    !
+    ! buoyancy
+    !
+    is_buoyant = any(ri(1:nscal) /= 0._rp)
+    if(is_buoyant) then
+      if(norm2(gravity) == 0._rp) call abort_run('&buoyancy: gravity must be a non-zero vector')
+      gvec(:) = gravity(:)/norm2(gravity)
     end if
+    if(myid == 0) call print_setup
+  contains
+    subroutine print_setup
+      integer :: n
+      character(len=*), parameter :: f1 = '(1x,a,t36,a)', fi = '(1x,a,t36,3(i0,:,1x))', fr = '(1x,a,t36,4(es12.5,:,1x))'
+      write(*,'(a)') ' ================================ HiCHAN run set-up ================================'
+      write(*,fi) 'Fourier modes nx, nz / points ny',nx,nz,ny
+      write(*,fr) 'box lx, lz (half-height h = 1)',lx,lz
+      write(*,f1) 'wall-normal grid',trim(grid_type)
+      if(trim(grid_type) == 'tanh') write(*,fr) '  stretching alpha_s',grid_alpha
+      write(*,fi) 'compact scheme order',fd_order
+      write(*,f1) '3/2 dealiasing',merge('yes','no ',dealias)
+      write(*,fr) 'Reynolds number re',re
+      if(forcing == 'cfr') then
+        write(*,fr) 'constant flow rate, ubulk',ubulk
+      else
+        write(*,fr) 'constant pressure gradient -dp/dx',dpdx
+      end if
+      write(*,f1) 'nonlinear term',trim(nl_form)
+      if(visc_theta > 0._rp) then
+        write(*,fr) 'viscous term implicit, theta',visc_theta
+      else
+        write(*,f1) 'viscous term','explicit (RK3)'
+      end if
+      if(fixed_dt) then
+        write(*,fr) 'fixed time step dt',dt
+      else
+        write(*,fr) 'adaptive time step, cfl, cfl_visc',cfl,cfl_visc
+      end if
+      write(*,fi) 'nstep',nstep
+      if(tmax < huge(1._rp)) write(*,fr) 'tmax',tmax
+      write(*,f1) 'initial condition',trim(init_type)
+      write(*,fi) 'number of scalars',nscal
+      do n=1,nscal
+        write(*,'(1x,a,i0,a,es10.3,a,f5.2,a,a1,a,es10.3,a,a1,a,es10.3,a,es10.3)') &
+          '  scalar ',n,': Pr = ',pr(n),', theta = ',scal_theta(n),', bottom ',sbc_bot(n),' = ',sval_bot(n), &
+          ', top ',sbc_top(n),' = ',sval_top(n),', Ri = ',ri(n)
+      end do
+      if(is_buoyant) write(*,fr) 'gravity direction (unit vector)',gvec
+      write(*,'(a)') ' ===================================================================================='
+    end subroutine print_setup
   end subroutine read_input
   !
   subroutine abort_run(msg)

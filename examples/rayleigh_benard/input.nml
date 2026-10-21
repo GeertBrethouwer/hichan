@@ -1,0 +1,35 @@
+!======================================================================================================
+!  Onset of Rayleigh-Benard convection between the two no-slip walls (active scalar, gravity -y).
+!  Gap d = 2h, s = +1 (bottom) / -1 (top):  Ra = ri * 2 * 8 * re^2 * pr = 16 ri re^2 pr.
+!  Linear theory: Ra_c = 1707.76 at k d = 3.117 -> lx = 2 pi d/3.117 = 4.0316,
+!  with re = 100, pr = 1:  ri_c = 1707.76/16e4 = 0.0106735.
+!  check.py runs ri = 0.9, 1.0, 1.1 ri_c and finds the zero of the growth rate (HiCHAN: Ra_c = 1707.78).
+!======================================================================================================
+&grid
+  nx = 4, nz = 2, ny = 33              ! one horizontal mode (linear problem)
+  lx = 4.031570, lz = 1.0
+  grid_type = 'tanh', grid_alpha = 1.5, fd_order = 6
+/
+&physics
+  re = 100., forcing = 'cpg', dpdx = 0.0     ! no mean flow
+  visc_theta = 0.5                     ! implicit viscous terms -> large time steps
+/
+&time
+  nstep = 10000000, tmax = 2500., fixed_dt = .true., dt = 0.1
+/
+&init
+  init_type = 'noise', init_amp = 1.e-6
+/
+&output
+  iout_log = 100, iout_stats = 0, iout_save_stats = 0, iout_restart = 0
+  mode_log_kx = 1, mode_log_kz = 0     ! energy of the convection mode (column 10 of log.dat)
+/
+&scalars
+  nscal = 1
+  pr(1) = 1.0, scal_theta(1) = 0.5
+  sbc_bot(1) = 'D', sval_bot(1) = 1.0, sbc_top(1) = 'D', sval_top(1) = -1.0, sinit(1) = 'linear'
+/
+&buoyancy
+  gravity = 0.0, -1.0, 0.0             ! gravity towards the bottom wall
+  ri(1)   = 0.0106735                  ! = ri_c (check.py overrides it)
+/

@@ -16,7 +16,7 @@ module mod_rk
   use mod_fields
   use mod_fft    , only: fwd_fft,bwd_fft
   use mod_ysolve , only: deriv1,add_lap,pressure_step,scalar_solve,cfr_correct,kxv,kzv,mean_owner,i00,j00, &
-                         set_implicit_guess,pressure_step_implicit,cfr_correct_implicit
+                         set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max
   use mod_compact, only: kappa1,lam2max
   implicit none
   private
@@ -179,6 +179,12 @@ contains
       call add_lap(v,nv,visc,tmp1)
       call add_lap(w,nw,visc,tmp1)
     end if
+    !
+    ! buoyancy (Boussinesq): - sum_n ri(n) s_n e_g, explicit (RK3) with the scalars of this stage
+    !
+    do n=1,nscal
+      if(ri(n) /= 0._rp) call add_buoyancy(s(:,:,:,n),-ri(n)*gvec(:))
+    end do
     if(forcing == 'cpg' .and. mean_owner) then
       !$acc parallel loop default(present) async(1)
       do k=1,ny
@@ -186,6 +192,26 @@ contains
       end do
     end if
   end subroutine nonlinear
+  !
+  subroutine add_buoyancy(f,b)
+    ! (nu,nv,nw) <- (nu,nv,nw) + b(1:3)*f
+    implicit none
+    complex(rp), intent(in) :: f(nkx,nkz,ny)
+    real(rp), intent(in) :: b(3)
+    real(rp) :: bx,by,bz
+    integer :: i,j,k
+    bx = b(1); by = b(2); bz = b(3)
+    !$acc parallel loop collapse(3) default(present) async(1)
+    do k=1,ny
+      do j=1,nkz
+        do i=1,nkx
+          nu(i,j,k) = nu(i,j,k) + bx*f(i,j,k)
+          nv(i,j,k) = nv(i,j,k) + by*f(i,j,k)
+          nw(i,j,k) = nw(i,j,k) + bz*f(i,j,k)
+        end do
+      end do
+    end do
+  end subroutine add_buoyancy
   !
   real(rp) function compute_dt()
     !
@@ -222,7 +248,16 @@ contains
     else
       dtv = huge(1._rp)
     end if
-    compute_dt = min(dta,dtv)
+    compute_dt = min(dta,dtv,dt_max)
+    !
+    ! internal gravity waves: |lambda| <= N, N^2 = |ri| |dS/dy| (mean stratification)
+    !
+    do n=1,nscal
+      if(ri(n) /= 0._rp) then
+        nmax = sqrt(abs(ri(n))*mean_gradient_max(s(:,:,:,n)))
+        if(nmax > 0._rp) compute_dt = min(compute_dt,cfl/nmax)
+      end if
+    end do
   end function compute_dt
   !
   subroutine update(f,nf,nfo,dtg,dtz)

@@ -34,7 +34,7 @@ module mod_ysolve
   private
   public :: init_ysolve,deriv1,add_lap,pressure_step,scalar_solve,cfr_correct,divergence_max, &
             wall_gradient,mean_owner,i00,j00,kxv,kzv,kmod,ismean, &
-            init_implicit,set_implicit_guess,pressure_step_implicit,cfr_correct_implicit
+            init_implicit,set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max
   real(rp), allocatable, public :: a1(:,:),b1(:,:),a2(:,:),b2(:,:)
   real(rp), allocatable :: t1w(:),t1d(:),t1u(:),t2w(:),t2d(:),t2u(:)
   real(rp), allocatable, public :: c1(:),cn(:),wq(:)
@@ -1188,4 +1188,28 @@ contains
     end do
     dpdx_eff = alpha/coef
   end subroutine cfr_correct_implicit
+  !
+  real(rp) function mean_gradient_max(f)
+    !
+    ! max_y |dF/dy| of the mean (kx = kz = 0) profile, on all ranks (for the buoyancy time-step limit)
+    !
+    use mpi
+    implicit none
+    complex(rp), intent(in) :: f(nkx,nkz,ny)
+    real(rp) :: gm
+    integer :: r,ierr
+    gm = 0._rp
+    if(mean_owner) then
+      !$acc serial default(present) async(1)
+      call dcol(nkx,nkz,ny,i00,j00,b1,t1w,t1d,t1u,f,psi)
+      !$acc end serial
+      !$acc parallel loop default(present) reduction(max:gm) async(1)
+      do r=1,ny
+        gm = max(gm,abs(real(psi(i00,j00,r),rp)))
+      end do
+      !$acc wait(1)
+    end if
+    call MPI_ALLREDUCE(MPI_IN_PLACE,gm,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,ierr)
+    mean_gradient_max = gm
+  end function mean_gradient_max
 end module mod_ysolve
