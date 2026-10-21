@@ -56,6 +56,12 @@ contains
     integer :: ierr
     call MPI_COMM_RANK(MPI_COMM_WORLD,myid ,ierr)
     call MPI_COMM_SIZE(MPI_COMM_WORLD,nproc,ierr)
+    if(myid == 0) write(*,'(a,i0)') ' number of MPI processes: ',nproc
+    if(myid == 0 .and. nproc == 1 .and. len_trim(slurm_ntasks()) > 0) then
+      if(trim(slurm_ntasks()) /= '1') write(*,'(a)') ' WARNING: SLURM_NTASKS = '//trim(slurm_ntasks())// &
+        ' but MPI reports 1 process: the tasks were started as independent MPI singletons '// &
+        '(launcher/MPI mismatch, try srun --mpi=pmix or the mpirun of the MPI used to compile HiCHAN)'
+    end if
 #if defined(_OPENACC)
     call init_device
 #endif
@@ -88,6 +94,14 @@ contains
     call MPI_COMM_FREE(local_comm,ierr)
   end subroutine init_device
 #endif
+  !
+  function slurm_ntasks() result(val)
+    implicit none
+    character(len=32) :: val
+    integer :: stat
+    call get_environment_variable('SLURM_NTASKS',val,status=stat)
+    if(stat /= 0) val = ''
+  end function slurm_ntasks
   !
   pure subroutine distribute(n,p,c,lo,cnt)
     ! block distribution of n points over p processes (remainder to the last ones)
@@ -183,6 +197,8 @@ contains
     integer :: istat
     integer(i8) :: wsa,wsb,wsize
     istat = cudecompInit(ch,MPI_COMM_WORLD)
+    if(istat /= CUDECOMP_RESULT_SUCCESS) call abort_run('cudecompInit failed (NCCL/NVSHMEM initialisation). '// &
+      'Check that all ranks belong to one MPI job (e.g. srun --mpi=pmix) and that each rank sees its own GPU')
     !
     ! grid B (z-FFT <-> wall-normal solves): autotune process grid and backend
     !

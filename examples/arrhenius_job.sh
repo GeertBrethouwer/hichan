@@ -26,6 +26,12 @@ export UCX_MEMTYPE_CACHE=n                           # Open MPI / UCX
 #export NCCL_NET="AWS Libfabric"
 
 cd $SLURM_SUBMIT_DIR
-# NSC recommends mpprun; srun with GPU binding also works
-mpprun $HICHAN/build/hichan
-# srun --gpus-per-task=1 --gpu-bind=closest --cpu-bind=cores $HICHAN/build/hichan
+# The MPI of the NVIDIA HPC SDK (Open MPI/HPC-X) needs PMIx. With a plain srun/mpprun the tasks
+# start as independent MPI "singletons" ("No PMIx server was reachable ... singletons will be
+# started"), all use GPU 0 and cuDecomp fails in ncclCommInitRank. Check `srun --mpi=list` and use:
+srun --mpi=pmix $HICHAN/build/hichan
+# alternatives:
+#   mpirun -np $SLURM_NTASKS --map-by ppr:4:node $HICHAN/build/hichan   # mpirun of the MPI used to build
+#   mpprun $HICHAN/build/hichan                                       # only if HiCHAN was built with an
+#                                                                     # MPI that mpprun recognises
+# A correct start prints the input namelist ONCE and "number of MPI processes: <SLURM_NTASKS>".
