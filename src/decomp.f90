@@ -80,18 +80,62 @@ contains
   !
 #if defined(_OPENACC)
   subroutine init_device
-    use cudafor, only: cudaGetDeviceCount,cudaSetDevice
+    !
+    ! one GPU per rank: node-local rank -> device; the assignment is reported and checked,
+    ! since two ranks on the same GPU make NCCL fail (ncclInvalidUsage, "Duplicate GPU")
+    !
+    use cudafor, only: cudaGetDeviceCount,cudaSetDevice,cudaGetDeviceProperties,cudaDeviceProp
     implicit none
-    integer :: local_comm,mydev,ndev,istat,ierr
+    integer :: local_comm,lrank,mydev,ndev,istat,ierr,hlen,r,q
     integer(acc_device_kind) :: dev_type
+    type(cudaDeviceProp) :: prop
+    character(len=MPI_MAX_PROCESSOR_NAME) :: host
+    character(len=128) :: cvd
+    character(len=256) :: line
+    character(len=256), allocatable :: lines(:)
+    character(len=MPI_MAX_PROCESSOR_NAME+16) :: key
+    character(len=MPI_MAX_PROCESSOR_NAME+16), allocatable :: keys(:)
+    logical :: dup
     call MPI_COMM_SPLIT_TYPE(MPI_COMM_WORLD,MPI_COMM_TYPE_SHARED,0,MPI_INFO_NULL,local_comm,ierr)
-    call MPI_COMM_RANK(local_comm,mydev,ierr)
+    call MPI_COMM_RANK(local_comm,lrank,ierr)
     istat = cudaGetDeviceCount(ndev)
-    mydev = mod(mydev,ndev)
+    if(istat /= 0 .or. ndev < 1) call abort_run('no GPU visible to this MPI rank')
+    mydev = mod(lrank,ndev)
     istat = cudaSetDevice(mydev)
     dev_type = acc_get_device_type()
     call acc_set_device_num(mydev,dev_type)
     call MPI_COMM_FREE(local_comm,ierr)
+    !
+    ! report and check
+    !
+    istat = cudaGetDeviceProperties(prop,mydev)
+    call MPI_GET_PROCESSOR_NAME(host,hlen,ierr)
+    call get_environment_variable('CUDA_VISIBLE_DEVICES',cvd,status=istat)
+    if(istat /= 0) cvd = '(unset)'
+    write(line,'(a,i0,a,a,a,i0,a,i0,a,i0,a,z4.4,a,z2.2,a,z2.2,a,a)') ' rank ',myid,' on ',trim(host), &
+      ': local rank ',lrank,', sees ',ndev,' GPU(s), uses device ',mydev,' (PCI ',prop%pciDomainID,':', &
+      prop%pciBusID,':',prop%pciDeviceID,'), CUDA_VISIBLE_DEVICES=',trim(cvd)
+    write(key,'(a,1x,z4.4,z2.2,z2.2)') trim(host),prop%pciDomainID,prop%pciBusID,prop%pciDeviceID
+    allocate(lines(0:nproc-1),keys(0:nproc-1))
+    call MPI_GATHER(line,len(line),MPI_CHARACTER,lines,len(line),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
+    call MPI_GATHER(key ,len(key ),MPI_CHARACTER,keys ,len(key ),MPI_CHARACTER,0,MPI_COMM_WORLD,ierr)
+    dup = .false.
+    if(myid == 0) then
+      write(*,'(a)') ' GPU assignment:'
+      do r=0,nproc-1
+        write(*,'(a)') trim(lines(r))
+      end do
+      do r=0,nproc-1
+        do q=r+1,nproc-1
+          if(keys(r) == keys(q)) dup = .true.
+        end do
+      end do
+      flush(6)
+    end if
+    call MPI_BCAST(dup,1,MPI_LOGICAL,0,MPI_COMM_WORLD,ierr)
+    if(dup) call abort_run('several MPI ranks use the same GPU (see the GPU assignment above). '// &
+      'Each rank must see a different GPU: request one task per GPU and do not restrict all tasks to the '// &
+      'same device (e.g. srun --gpus-per-task=1 --gpu-bind=single:1, or no GPU binding with --gpus-per-node=4)')
   end subroutine init_device
 #endif
   !

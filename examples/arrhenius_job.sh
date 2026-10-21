@@ -22,6 +22,7 @@ export OMP_NUM_THREADS=1
 # GPU-aware MPI (needed by cuDecomp's MPI backends and by the non-cuDecomp build):
 export MPICH_GPU_SUPPORT_ENABLED=1                   # Cray MPICH
 export UCX_MEMTYPE_CACHE=n                           # Open MPI / UCX
+export NCCL_DEBUG=WARN                               # NCCL prints the reason if it fails
 # NCCL over the node interconnect (Slingshot): uncomment if NCCL backends are selected by the autotuner
 #export NCCL_NET="AWS Libfabric"
 
@@ -29,7 +30,11 @@ cd $SLURM_SUBMIT_DIR
 # The MPI of the NVIDIA HPC SDK (Open MPI/HPC-X) needs PMIx. With a plain srun/mpprun the tasks
 # start as independent MPI "singletons" ("No PMIx server was reachable ... singletons will be
 # started"), all use GPU 0 and cuDecomp fails in ncclCommInitRank. Check `srun --mpi=list` and use:
+# HiCHAN prints the GPU used by each rank; every rank must use a different GPU.
 srun --mpi=pmix $HICHAN/build/hichan
+# if Slurm hands each task its own GPU (or the ranks end up on the same GPU), bind explicitly:
+#   srun --mpi=pmix --gpus-per-task=1 --gpu-bind=single:1 $HICHAN/build/hichan
+# if NCCL still fails, set  cudecomp_enable_nccl = .false.  in &parallel (MPI backends only)
 # alternatives:
 #   mpirun -np $SLURM_NTASKS --map-by ppr:4:node $HICHAN/build/hichan   # mpirun of the MPI used to build
 #   mpprun $HICHAN/build/hichan                                       # only if HiCHAN was built with an

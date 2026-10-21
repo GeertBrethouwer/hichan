@@ -148,6 +148,7 @@ contains
     character(len=*), intent(in) :: msg
     integer :: ierr
     write(*,'(a)') 'HiCHAN ERROR: '//trim(msg)
+    flush(6)
     call MPI_ABORT(MPI_COMM_WORLD,1,ierr)
     stop 1
   end subroutine abort_run
