@@ -34,9 +34,10 @@ module mod_param
   integer  :: nstep = 1000
   real(rp) :: tmax  = huge(1._rp)
   real(rp) :: wall_time_max = huge(1._rp)  ! in seconds; the run stops (with a restart file) before this
-  real(rp) :: dt    = 1.e-3_rp
+  real(rp) :: dt    = 1.e-5_rp              ! fixed time step, or the first step of an adaptive run
   logical  :: fixed_dt = .false.
   real(rp) :: dt_max = 1._rp                ! upper bound of the adaptive time step
+  real(rp) :: dt_growth = 1.1_rp            ! adaptive dt may grow by at most this factor per step
   real(rp) :: cfl = 1.0_rp, cfl_visc = 1.5_rp ! RK3: |lambda dt| < sqrt(3) (imag.) and 2.51 (real)
   !
   ! &init
@@ -98,7 +99,7 @@ contains
     integer :: iunit,ios
     namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
     namelist /physics/ re,forcing,ubulk,dpdx,nl_form,visc_theta,impl_maxit,impl_tol
-    namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,cfl,cfl_visc
+    namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
                       mode_log_kx,mode_log_kz
@@ -128,6 +129,8 @@ contains
     if(mod(nx,2) /= 0 .or. mod(nz,2) /= 0) call abort_run('nx and nz must be even')
     if(ny < 9) call abort_run('ny must be at least 9')
     if(all(fd_order /= [4,6])) call abort_run('fd_order must be 4 or 6')
+    if(dt <= 0._rp) call abort_run('dt must be > 0')
+    if(dt_growth < 1._rp) call abort_run('dt_growth must be >= 1')
     if(visc_theta < 0._rp .or. visc_theta > 1._rp) call abort_run('0 <= visc_theta <= 1 required')
     if(any(scal_theta(:) < 0._rp .or. scal_theta(:) > 1._rp)) call abort_run('0 <= scal_theta <= 1 required')
     if(nscal < 0 .or. nscal > nscal_max) call abort_run('0 <= nscal <= 16 required')

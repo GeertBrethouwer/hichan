@@ -54,8 +54,10 @@
   tmax          = 1500.                ! stop when this simulation time is reached                    [huge]
   wall_time_max = 85000.               ! stop (writing a restart file) after this wall-clock time [s] [huge]
   fixed_dt      = .false.              ! .true.: constant dt; .false.: adaptive dt from cfl, cfl_visc [.false.]
-  dt            = 1.e-3                ! time step if fixed_dt, otherwise the first time step         [1e-3]
+  dt            = 1.e-5                ! time step if fixed_dt; otherwise the first time step, from   [1e-5]
+                                       !   which dt grows by at most dt_growth per step
   dt_max        = 1.0                  ! upper bound of the adaptive time step                        [1.0]
+  dt_growth     = 1.1                  ! adaptive dt grows by at most this factor per step            [1.1]
   cfl           = 1.2                  ! advective CFL number (RK3 stable up to sqrt(3) = 1.73); also  [1.0]
                                        !   used for the internal-gravity-wave limit (active scalars)
   cfl_visc      = 1.5                  ! explicit-diffusion limit (RK3 stable up to 2.51); not used   [1.5]

@@ -316,14 +316,25 @@ contains
     do q=1,3
       call nonlinear(q == 1,dtn)
       if(q == 1) then
-        if(visc_theta > 0._rp .and. .not.fixed_dt) then
+        !
+        ! dtcur: time step of the previous step (initially the input dt, or the dt of the restart file);
+        ! dtn: stability limit (or the fixed dt). An adaptive dt grows by at most dt_growth per step,
+        ! so a run starts with the (small) input dt and does not jump to dt_max, e.g. from rest.
+        !
+        if(fixed_dt) then
+          dtcur = dtn
+        else if(visc_theta > 0._rp) then
           !
           ! keep dt piecewise constant: the influence matrices of the implicit scheme
           ! depend on dt and are recomputed only when it changes
           !
-          if(dtcur > dtn .or. dtcur < 0.8_rp*dtn) dtcur = 0.95_rp*dtn
+          if(dtcur > dtn) then
+            dtcur = 0.95_rp*dtn
+          else if(dtcur < 0.8_rp*dtn) then
+            dtcur = min(0.95_rp*dtn,dt_growth*dtcur)
+          end if
         else
-          dtcur = dtn
+          dtcur = min(dtn,dt_growth*dtcur)
         end if
       end if
       dtg = rk_gam(q)*dtcur
