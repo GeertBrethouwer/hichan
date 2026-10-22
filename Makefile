@@ -58,8 +58,13 @@ else
   LIBS   += $(FFTW_LIB)
 endif
 
-.PHONY: all clean
+.PHONY: all clean ygrid
 all: $(EXE)
+
+# stand-alone tool: wall-normal grid y_j, dy_j (and y+, dy+) for given ny, grid type, alpha
+ygrid: $(BUILDDIR)/ygrid
+$(BUILDDIR)/ygrid: tools/ygrid.f90 | $(BUILDDIR)
+	gfortran -O2 $< -o $@ || $(FC) -O2 $< -o $@
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)

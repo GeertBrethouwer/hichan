@@ -43,7 +43,9 @@ examples/          input_reference.nml (every input item, commented), ts_wave (p
                    (active scalars, check.py), retau180, retau395 (paper Sec. 5.3), arrhenius_job.sh
 tools/             build_cudecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units),
                    restart_slices.py (2D slices from a restart file -> .mat), plot_slices.m (MATLAB/Octave),
-                   mean_tauw.m (time-averaged tau_w, u_tau, Re_tau from log.dat, MATLAB/Octave)
+                   mean_tauw.m (time-averaged tau_w, u_tau, Re_tau from log.dat, MATLAB/Octave),
+                   ygrid.f90 (y and dy, optionally y+ and dy+, for given ny/grid type/alpha: make ygrid;
+                   build/ygrid 193 tanh 4.0 395)
 ```
 
 ## The numerical method in brief
