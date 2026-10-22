@@ -235,6 +235,9 @@ seconds and check the GPU results against known values.
 
 ## Input (`input.nml`)
 
+Performance tuning through the input file is described in [PERF.md](PERF.md).
+
+
 **`examples/input_reference.nml`** lists every input item with its meaning, units and default value. Copy it as
 the starting point for a new case. The input consists of Fortran namelists, one group per topic. `!` starts a
 comment, items that are not given keep their defaults, and per-scalar items are written per index
