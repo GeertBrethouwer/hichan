@@ -42,7 +42,8 @@ examples/          input_reference.nml (every input item, commented), ts_wave (p
                    scalar_check (exact laminar scalar solutions), rayleigh_benard and vertical_channel
                    (active scalars, check.py), retau180, retau395 (paper Sec. 5.3), arrhenius_job.sh
 tools/             build_cudecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units),
-                   restart_slices.py (2D slices from a restart file -> .mat), plot_slices.m (MATLAB/Octave)
+                   restart_slices.py (2D slices from a restart file -> .mat), plot_slices.m (MATLAB/Octave),
+                   mean_tauw.m (time-averaged tau_w, u_tau, Re_tau from log.dat, MATLAB/Octave)
 ```
 
 ## The numerical method in brief
@@ -252,6 +253,8 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 
 * `log.dat`: step, t, Δt, bulk velocity, applied −dp/dx, τ_w, Re_τ, max |div u|, fluctuation energy, energy of
   one Fourier mode (`mode_log_kx, mode_log_kz`), and the wall gradients of each scalar.
+  Time average of τ_w from a given time on (MATLAB/Octave):
+  `r = mean_tauw('data/log.dat', 300, 'plot', true)` (time-weighted; handles restarts; error by batch means).
 * `stats.dat`: time-averaged profiles, computed exactly in spectral space: U, V, W, ⟨u′u′⟩ … ⟨v′w′⟩, P, ⟨p′p′⟩,
   and per scalar S, ⟨s′s′⟩, ⟨u′s′⟩, ⟨v′s′⟩, ⟨w′s′⟩. `tools/plot_stats.py` converts them to wall units.
 * `restart.bin` / `restart.hdr`: spectral fields (global `(nx/2, nz, ny)` complex arrays), independent of the
