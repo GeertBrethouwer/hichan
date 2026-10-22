@@ -244,6 +244,7 @@ buoyancy force.
 | `'vv'`, TS wave, Re = 5000, α = 1.12, error of the decay rate vs. Orr–Sommerfeld | `vv_neumann = 'explicit'`: 6th order 6.4e-6 (Ny = 65), 4.6e-7 (Ny = 129); 4th order 3.9e-10 / 1.7e-8 (partly cancelling errors). `'compact'`: 4.2e-5 / 4.6e-6 (6th order), 4.3e-5 / 5.2e-6 (4th order), divergence 1e-20 at all points. (`'im'`: 1.1e-7 / 2.1e-8) |
 | `'vv'`, Rayleigh–Bénard onset | Ra_c = 1707.80 (linear theory 1707.76) |
 | `'vv'`, vertical channel natural convection | steady profile to 1.6e-6, v = 0 exactly |
+| `'vv'` vs `'im'`, turbulent channel Re_b = 2800, 32×65×32 (very coarse), from noise to t = 200, average over 170–200 | both stable through transition. Re_τ 200.8 vs 202.1, centreline U⁺ 16.13 vs 16.10, u_rms⁺ peak 2.68 vs 2.67 (short average, coarse grid). The same cost per step on CPU; `div_max` of `'vv'` (explicit wall derivative) ≈ 5e-3 in the wall rows on this coarse grid, interior at round-off |
 | `'vv'`, 3D with oblique gravity, two active scalars | identical on 1, 3 and 4 ranks and with the OpenACC build |
 | Restart | 20 steps straight vs. 10 + restart + 10 (restarting on 3 instead of 2 ranks): bit-identical |
 | OpenACC code path | built with `gfortran -fopenacc` (host fallback), with cuFFT emulated by FFTW using the same layout parameters: results identical to the CPU build |
