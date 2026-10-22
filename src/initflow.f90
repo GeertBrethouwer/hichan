@@ -119,10 +119,14 @@ contains
     complex(rp), intent(inout) :: u(nkx,nkz,ny),v(nkx,nkz,ny),w(nkx,nkz,ny)
     real(rp), intent(in) :: rms
     real(rp) :: e,fac
+    ! u,v,w may be the field arrays (already on the device) or host temporaries: 'create' allocates
+    ! device copies only for the latter, 'delete' frees only those
+    !$acc enter data create(u,v,w)
     !$acc update device(u,v,w)
     call pressure_step(u,v,w)
     !$acc wait(1)
     !$acc update self(u,v,w)
+    !$acc exit data delete(u,v,w)
     call fluct_energy(u,v,w,e)
     fac = 0._rp
     if(e > 0._rp) fac = rms/sqrt(e)
