@@ -12,6 +12,11 @@ HiCHAN solves the incompressible Navier–Stokes equations in a plane channel, t
   on the non-uniform grid. First and second derivatives are both compact (`A1 f' = B1 f`, `A2 f'' = B2 f`).
 * **Pressure:** influence-matrix method. Continuity is satisfied exactly at **every** grid point, including the
   walls, so the discrete divergence is at round-off level (1e-15 to 1e-10, depending on grid and resolution).
+* **Alternative formulation (`ns_method = 'vv'`):** the velocity–vorticity method of Lluesma-Rodríguez,
+  Álcantara-Ávila, Pérez-Quiles and Hoyas, *A code for simulating heat transfer in turbulent channel flow*,
+  Mathematics 9 (2021) 756 (Kim–Moin–Moser formulation for φ = ∇²v and ω_y; SMR RK3 with implicit viscous
+  terms, Eqs. 30–32), on the same compact finite differences, FFTs, decomposition, scalars and buoyancy. See
+  *Velocity–vorticity option* below.
 * **Time:** low-storage 3-stage RK3 (Table 1 of the paper). The viscous terms are either explicit (Appendix B.1,
   `visc_theta = 0`, the default and the variant the paper recommends for channel flow, Sec. 6) or implicit with
   the θ-method (Appendix B.2, `visc_theta > 0`, e.g. 0.5 = Crank–Nicolson). Scalar diffusion uses the same
@@ -30,7 +35,8 @@ src/param.f90      input (namelists in input.nml)
 src/compact.f90    grid, compact-scheme coefficients on non-uniform grids, quadrature
 src/decomp.f90     pencil decomposition and transposes (cuDecomp or MPI_Alltoallv)
 src/fft.f90        physical x-pencil <-> spectral z-pencil transforms (cuFFT / FFTW), dealiasing
-src/ysolve.f90     wall-normal column solvers: derivatives, influence-matrix pressure step, scalar Helmholtz
+src/ysolve.f90     wall-normal column solvers: derivatives, influence-matrix pressure step, scalar Helmholtz,
+                   velocity-vorticity (phi, omega_y) solver
 src/rk.f90         nonlinear terms (advective or rotational form), RK3 step, CFL
 src/fields.f90     field storage
 src/stats.f90      statistics (Parseval, spectral space), log
@@ -163,6 +169,49 @@ streamwise part). The time step also respects the internal-gravity-wave limit `�
 **Forcing.** Constant flow rate (`cfr`, exact correction of the mean flow, which is valid for explicit viscous
 terms) or constant pressure gradient (`cpg`).
 
+### Velocity–vorticity option (`ns_method = 'vv'`)
+
+This option follows Lluesma-Rodríguez et al., Mathematics 9 (2021) 756. The pressure is eliminated.
+For each wavenumber pair with k² = kx² + kz² > 0, the code evolves
+
+```
+∂φ/∂t  = h_v + (1/Re) ∇²φ,     ∇²v = φ,           h_v = −k² N_y − D1(i kx N_x + i kz N_z)
+∂ω/∂t  = h_g + (1/Re) ∇²ω,                        h_g = i kz N_x − i kx N_z
+v = 0 and dv/dy = 0 at the walls;  ω = 0 at the walls
+u = (i kx D1 v − i kz ω)/k²,    w = (i kz D1 v + i kx ω)/k²
+```
+
+Here `N` is the nonlinear term plus buoyancy, in the same rotational or advective form as `'im'`. The mean flow
+(k = 0) obeys the 1D diffusion equations for U(y) and W(y), with the CFR or CPG forcing and the mean
+buoyancy force.
+
+* **Time integration:** the three-substep RK3 of Spalart, Moser & Rogers (1991), as in the paper (Eqs. 30–32).
+  The nonlinear terms use the RK3 weights γ, ζ. The viscous terms are implicit with α = (29/96, −3/40, 1/6) and
+  β = (37/160, 5/24, 1/6). Each substep needs one Helmholtz problem for ω, one for φ, and one Poisson problem
+  for v.
+* **Spatial discretisation:** every y-operator is the A2-premultiplied compact operator,
+  `[(1+ck²)A2 − cB2] f = A2 r`. The two Dirichlet conditions are applied with the same τ (wall-row) correction
+  as the scalars. The four conditions on v are applied by superposition with two homogeneous solutions
+  (φ = 1 at one wall): v = 0 by the Poisson problem, and dv/dy = 0 by a cached 2×2 influence matrix per
+  wavenumber and RK substep. Everything is banded, O(Ny) per wavenumber, one GPU thread per (kx, kz), without
+  iterations. This is cheaper than the implicit B.2 option of `'im'`.
+* **Continuity** holds exactly (to round-off) at all interior points, because u and w are built from v with
+  the same compact D1. The wall condition dv/dy = 0 uses the derivative chosen by `vv_neumann`:
+  * `'explicit'` (default): 6-point one-sided derivative at the wall (5th order). This is markedly more
+    accurate than the compact closure (table below). The compact D1 of v at the wall row is then not exactly
+    zero but of truncation size, so `div_max` in `log.dat` reports this wall-row value (≈1e-9 for a resolved
+    linear mode; up to 1e-2 in strongly under-resolved transition). u = w = 0 at the walls exactly.
+  * `'compact'`: the boundary row of the compact D1. The divergence is then at round-off at every point,
+    including the walls, but the wall closure is less accurate.
+* **Restrictions and differences from `'im'`:**
+  * The viscous terms are always implicit, so `visc_theta`, `impl_maxit` and `impl_tol` are ignored.
+  * The time step obeys only the advective (and gravity-wave) limit, kept piecewise constant as in the
+    implicit `'im'` option.
+  * The pressure is not computed. `log.dat` still gives −dp/dx, τ_w and Re_τ.
+  * Scalars are unchanged: θ-method, `scal_theta`, the same boundary conditions and sources.
+  * Restart files hold u, v, w and the scalars, so a run can be restarted with either method; φ and ω are
+    rebuilt from the velocity.
+
 ### Differences from the paper (all deliberate)
 
 * The paper's nested superposition (B.9 and Eq. 23) is merged into one 6×6 influence matrix per wavenumber.
@@ -191,6 +240,11 @@ terms) or constant pressure gradient (`cpg`).
 | Buoyancy, natural convection in a vertical channel (`examples/vertical_channel`) | gravity along −x, −z and oblique (−0.6, 0, −0.8): steady profile u = ri·re·(y³−y)/6 (projected on gravity) reproduced to 1.6e-6 (the residual start-up transient), v = 0 exactly |
 | Buoyancy, onset of Rayleigh–Bénard convection (`examples/rayleigh_benard`) | growth rate changes sign at **Ra_c = 1707.78** (linear theory 1707.76), at k d = 3.117 |
 | Buoyancy, 3D with oblique gravity, two active scalars | same results on 1, 3 and 4 ranks and with the OpenACC build |
+| `'vv'`, laminar CFR | −dp/dx = 3/Re exactly |
+| `'vv'`, TS wave, Re = 5000, α = 1.12, error of the decay rate vs. Orr–Sommerfeld | `vv_neumann = 'explicit'`: 6th order 6.4e-6 (Ny = 65), 4.6e-7 (Ny = 129); 4th order 3.9e-10 / 1.7e-8 (partly cancelling errors). `'compact'`: 4.2e-5 / 4.6e-6 (6th order), 4.3e-5 / 5.2e-6 (4th order), divergence 1e-20 at all points. (`'im'`: 1.1e-7 / 2.1e-8) |
+| `'vv'`, Rayleigh–Bénard onset | Ra_c = 1707.80 (linear theory 1707.76) |
+| `'vv'`, vertical channel natural convection | steady profile to 1.6e-6, v = 0 exactly |
+| `'vv'`, 3D with oblique gravity, two active scalars | identical on 1, 3 and 4 ranks and with the OpenACC build |
 | Restart | 20 steps straight vs. 10 + restart + 10 (restarting on 3 instead of 2 ranks): bit-identical |
 | OpenACC code path | built with `gfortran -fopenacc` (host fallback), with cuFFT emulated by FFTW using the same layout parameters: results identical to the CPU build |
 
@@ -246,7 +300,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | namelist | contents |
 |---|---|
 | `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `dealias` |
-| `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
+| `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
 | `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz` |

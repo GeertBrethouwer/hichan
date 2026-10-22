@@ -40,6 +40,7 @@ program hichan
   call init_fft(up)
   call init_ysolve
   if(visc_theta > 0._rp) call init_implicit
+  if(ns_method == 'vv') call init_vv
   call init_rk
   call init_stats
   if(myid == 0) then
@@ -70,6 +71,7 @@ program hichan
     time = 0._rp; istep = 0; dtcur = dt
   end if
   istep0 = istep
+  if(ns_method == 'vv') call vv_state_from_velocity(u,v,w)
   !
   if(myid == 0) then
     open(newunit=ilog,file=trim(data_dir)//'/log.dat',position='append')

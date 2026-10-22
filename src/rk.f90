@@ -16,7 +16,8 @@ module mod_rk
   use mod_fields
   use mod_fft    , only: fwd_fft,bwd_fft
   use mod_ysolve , only: deriv1,add_lap,pressure_step,scalar_solve,cfr_correct,kxv,kzv,mean_owner,i00,j00, &
-                         set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max
+                         set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max, &
+                         vv_rhs_terms,vv_step,vv_cfr,phv,om
   use mod_compact, only: kappa1,lam2max
   implicit none
   private
@@ -174,7 +175,7 @@ contains
       call phys_prod(vp,gp(:,:,:,1),ap,-1._rp,.true.)
       call fwd_fft(ap,nw)
     end if
-    if(visc_theta == 0._rp) then
+    if(visc_theta == 0._rp .and. ns_method /= 'vv') then
       call add_lap(u,nu,visc,tmp1)
       call add_lap(v,nv,visc,tmp1)
       call add_lap(w,nw,visc,tmp1)
@@ -191,6 +192,10 @@ contains
         nu(i00,j00,k) = nu(i00,j00,k) + dpdx
       end do
     end if
+    !
+    ! velocity-vorticity method: right-hand sides h_g (in nu) and h_v (in nv) of Eqs. (14), (17)
+    !
+    if(ns_method == 'vv') call vv_rhs_terms(nu,nv,nw)
   end subroutine nonlinear
   !
   subroutine add_buoyancy(f,b)
@@ -239,7 +244,7 @@ contains
     ! the theta-method is unconditionally stable for theta >= 1/2; for theta < 1/2 the
     ! explicit part limits the time step (effective diffusivity (1-2 theta)*nu)
     !
-    nmax = visc*max(0._rp,1._rp-2._rp*visc_theta)
+    nmax = visc*max(0._rp,1._rp-2._rp*merge(1._rp,visc_theta,ns_method == 'vv'))
     do n=1,nscal
       nmax = max(nmax,diff(n)*max(0._rp,1._rp-2._rp*scal_theta(n)))
     end do
@@ -323,7 +328,7 @@ contains
         !
         if(fixed_dt) then
           dtcur = dtn
-        else if(visc_theta > 0._rp) then
+        else if(visc_theta > 0._rp .or. ns_method == 'vv') then
           !
           ! keep dt piecewise constant: the influence matrices of the implicit scheme
           ! depend on dt and are recomputed only when it changes
@@ -343,7 +348,16 @@ contains
       !
       ! velocity: r^q, then pressure / influence-matrix step
       !
-      if(visc_theta == 0._rp) then
+      if(ns_method == 'vv') then
+        !
+        ! velocity-vorticity method, Eqs. (30)-(32): (I - b dt L) f = (I + a dt L) f^q + dt (gam h + zet h_old)
+        !
+        call rhs_theta(om ,nu,nuo,dtg,dtz,rk_asmr(q)*dtcur*visc)
+        call rhs_theta(phv,nv,nvo,dtg,dtz,rk_asmr(q)*dtcur*visc)
+        c = rk_bsmr(q)*dtcur*visc
+        call vv_step(u,v,w,q,c)
+        if(forcing == 'cfr') call vv_cfr(u,ubulk,dpe,dtb,c,q)
+      else if(visc_theta == 0._rp) then
         call update(u,nu,nuo,dtg,dtz)
         call update(v,nv,nvo,dtg,dtz)
         call update(w,nw,nwo,dtg,dtz)

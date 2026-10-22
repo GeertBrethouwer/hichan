@@ -24,6 +24,12 @@ module mod_param
   character(len=3)  :: forcing = 'cfr'     ! 'cfr' (constant flow rate) or 'cpg' (constant pressure gradient)
   real(rp) :: ubulk = 1._rp                ! bulk velocity for 'cfr'
   real(rp) :: dpdx  = 0._rp                ! -dp/dx for 'cpg' (=1 with re=Re_tau in wall units)
+  character(len=3) :: ns_method = 'im'     ! 'im': primitive variables + influence matrix (Lenaers et al. 2014)
+                                           ! 'vv': velocity-vorticity, phi = lap(v) and omega_y, implicit
+                                           !       viscous terms (Lluesma-Rodriguez et al., Mathematics 2021)
+  character(len=8) :: vv_neumann = 'explicit' ! 'vv': wall derivative for dv/dy = 0: 'explicit' (6-point one-
+                                           !   sided, 5th order, more accurate) or 'compact' (row of D1:
+                                           !   divergence exactly zero also at the walls)
   real(rp) :: visc_theta = 0._rp          ! theta of the viscous term (0: explicit, Appendix B.1; >0: implicit, B.2)
   integer  :: impl_maxit = 10              ! max. iterations of the implicit pressure/velocity coupling (B.2)
   real(rp) :: impl_tol = 1.e-12_rp         ! convergence: max|v^{m+1}-v^m| < impl_tol*max|v|
@@ -94,13 +100,19 @@ module mod_param
   real(rp), parameter :: rk_gam(3) = [ 8._rp/15._rp, 5._rp/12._rp,  3._rp/4._rp]
   real(rp), parameter :: rk_zet(3) = [ 0._rp      ,-17._rp/60._rp,-5._rp/12._rp]
   real(rp), parameter :: rk_bet(3) = rk_gam(:) + rk_zet(:)
+  !
+  ! implicit/explicit split of the linear terms in the 'vv' method (Spalart, Moser & Rogers 1991,
+  ! Eqs. (30)-(32) of Lluesma-Rodriguez et al. 2021): (I - b_q dt L) f^{q+1} = (I + a_q dt L) f^q + ...
+  !
+  real(rp), parameter :: rk_asmr(3) = [29._rp/96._rp, -3._rp/40._rp, 1._rp/6._rp]
+  real(rp), parameter :: rk_bsmr(3) = [37._rp/160._rp, 5._rp/24._rp, 1._rp/6._rp]
 contains
   subroutine read_input(myid)
     implicit none
     integer, intent(in) :: myid
     integer :: iunit,ios
     namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
-    namelist /physics/ re,forcing,ubulk,dpdx,nl_form,visc_theta,impl_maxit,impl_tol
+    namelist /physics/ re,forcing,ubulk,dpdx,ns_method,vv_neumann,nl_form,visc_theta,impl_maxit,impl_tol
     namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
@@ -134,6 +146,8 @@ contains
     if(dt <= 0._rp) call abort_run('dt must be > 0')
     if(ls_nmin < 1 .or. ls_nmax < ls_nmin) call abort_run('&init: 1 <= ls_nmin <= ls_nmax required')
     if(dt_growth < 1._rp) call abort_run('dt_growth must be >= 1')
+    if(all(ns_method /= ['im ','vv '])) call abort_run("ns_method must be 'im' or 'vv'")
+    if(all(vv_neumann /= ['explicit','compact '])) call abort_run("vv_neumann must be 'explicit' or 'compact'")
     if(visc_theta < 0._rp .or. visc_theta > 1._rp) call abort_run('0 <= visc_theta <= 1 required')
     if(any(scal_theta(:) < 0._rp .or. scal_theta(:) > 1._rp)) call abort_run('0 <= scal_theta <= 1 required')
     if(nscal < 0 .or. nscal > nscal_max) call abort_run('0 <= nscal <= 16 required')
@@ -175,8 +189,15 @@ contains
       else
         write(*,fr) 'constant pressure gradient -dp/dx',dpdx
       end if
+      if(ns_method == 'vv') then
+        write(*,f1) 'Navier-Stokes solver','velocity-vorticity (phi, omega_y), implicit viscous (SMR RK3)'
+      else
+        write(*,f1) 'Navier-Stokes solver','primitive variables + influence matrix'
+      end if
       write(*,f1) 'nonlinear term',trim(nl_form)
-      if(visc_theta > 0._rp) then
+      if(ns_method == 'vv') then
+        write(*,f1) 'wall derivative in dv/dy = 0',trim(vv_neumann)
+      else if(visc_theta > 0._rp) then
         write(*,fr) 'viscous term implicit, theta',visc_theta
       else
         write(*,f1) 'viscous term','explicit (RK3)'

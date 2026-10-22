@@ -38,6 +38,16 @@
                                        ! 'cpg': constant pressure gradient (-dp/dx = dpdx)
   ubulk      = 1.0                     ! bulk velocity for 'cfr'                                      [1.0]
   dpdx       = 0.0                     ! -dp/dx for 'cpg' (1.0 with re = Re_tau: wall units)           [0.0]
+  ns_method  = 'im'                    ! Navier-Stokes solver:                                        ['im']
+                                       !  'im': primitive variables, pressure by the influence-matrix
+                                       !        method (Lenaers et al., JCP 2014); exact continuity
+                                       !  'vv': velocity-vorticity (phi = lap v, omega_y; Lluesma-
+                                       !        Rodriguez et al., Mathematics 2021), SMR RK3 with
+                                       !        implicit viscous terms; no pressure; visc_theta, impl_*
+                                       !        ignored; scalars and buoyancy as for 'im'
+  vv_neumann = 'explicit'              ! 'vv' only: derivative in dv/dy = 0 at the walls: 'explicit'  ['explicit']
+                                       !   (6-point one-sided, more accurate) or 'compact' (compact D1
+                                       !   row: divergence at round-off also in the wall rows)
   nl_form    = 'rotational'            ! nonlinear term: 'rotational' (u x omega, energy conserving,  ['rotational']
                                        !   9 FFTs) or 'advective' (as in the paper, 15 FFTs)
   visc_theta = 0.0                     ! viscous term: 0 = explicit (App. B.1); >0 = implicit theta-  [0.0]

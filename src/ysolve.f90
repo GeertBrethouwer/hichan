@@ -25,16 +25,17 @@
 !
 module mod_ysolve
   use mod_types
-  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run
+  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run,vv_neumann
   use mod_decomp, only: nkx,nkz,kx_lo,kz_lo
   use mod_compact, only: nbw,ca1 => a1,cb1 => b1,ca2 => a2,cb2 => b2,ct1w => t1w,ct1d => t1d,ct1u => t1u, &
                          ct2w => t2w,ct2d => t2d,ct2u => t2u,cc1 => c1,ccn => cn,cnc1 => nc1,cncn => ncn, &
-                         cwq => wq,ckl1 => kl1,cku1 => ku1,ckl2 => kl2,cku2 => ku2
+                         cwq => wq,ckl1 => kl1,cku1 => ku1,ckl2 => kl2,cku2 => ku2,cew1 => ew1,cewn => ewn
   implicit none
   private
   public :: init_ysolve,deriv1,add_lap,pressure_step,scalar_solve,cfr_correct,divergence_max, &
             wall_gradient,mean_owner,i00,j00,kxv,kzv,kmod,ismean, &
-            init_implicit,set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max
+            init_implicit,set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max, &
+            init_vv,vv_state_from_velocity,vv_rhs_terms,vv_step,vv_cfr
   real(rp), allocatable, public :: a1(:,:),b1(:,:),a2(:,:),b2(:,:)
   real(rp), allocatable :: t1w(:),t1d(:),t1u(:),t2w(:),t2d(:),t2u(:)
   real(rp), allocatable, public :: c1(:),cn(:),wq(:)
@@ -55,6 +56,15 @@ module mod_ysolve
   real(rp), allocatable :: hinv_i(:,:,:,:)   ! (4 ,nkx,nkz,3) inverse 2x2 wall corrections of the Helmholtz solves
   real(rp) :: c_cached(3) = -1._rp
   complex(rp), allocatable :: vit(:,:,:),cvec(:,:,:),tw1(:,:,:)
+  !
+  ! velocity-vorticity method ('vv')
+  !
+  complex(rp), allocatable, public :: phv(:,:,:),om(:,:,:)  ! phi = lap(v) and omega_y (mean columns: W00, U00)
+  complex(rp), allocatable :: wa(:,:,:),wb(:,:,:)
+  real(rp), allocatable :: hinv_c(:,:,:,:),ginv_v(:,:,:,:),hinv_v(:,:,:)
+  real(rp) :: c_cached_vv(3) = -1._rp
+  real(rp), allocatable :: dw1(:),dwn(:)    ! wall-derivative functionals used for dv/dy = 0
+  integer :: ndw1,ndwn
 contains
   subroutine init_ysolve
     implicit none
@@ -1212,4 +1222,340 @@ contains
     call MPI_ALLREDUCE(MPI_IN_PLACE,gm,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,ierr)
     mean_gradient_max = gm
   end function mean_gradient_max
+  !
+  ! ===========================================================================
+  ! velocity-vorticity method ('vv'): F. Lluesma-Rodriguez, F. Alcantara-Avila, M.J. Perez-Quiles,
+  ! S. Hoyas, "A code for simulating heat transfer in turbulent channel flow", Mathematics 9 (2021) 756
+  ! (Kim-Moin-Moser formulation, compact finite differences in y, SMR RK3 with implicit viscous terms)
+  !
+  !   d/dt phi     = h_v + nu (D2 - k^2) phi ,  (D2 - k^2) v = phi ,  v = D1 v = 0 at the walls
+  !   d/dt omega_y = h_g + nu (D2 - k^2) omega_y ,                    omega_y = 0 at the walls
+  !   h_v = -k^2 N_y - D1 (i kx N_x + i kz N_z) ,   h_g = i kz N_x - i kx N_z
+  !   u = (i kx D1 v - i kz omega_y)/k^2 ,   w = (i kz D1 v + i kx omega_y)/k^2   (Eqs. (12)-(13))
+  ! N = nonlinear term + body forces (buoyancy, mean pressure gradient). The (0,0) modes of u and w
+  ! obey d/dt U00 = N_x00 + nu D2 U00 (and W00), stored in the mean columns of om and phv.
+  ! The Neumann condition D1 v = 0 is imposed with two homogeneous solutions (phi = 1 at one wall)
+  ! whose 2x2 matrix depends on k and dt only (cached per RK substep). The discrete divergence
+  ! i kx u + i kz w + D1 v vanishes identically.
+  ! ===========================================================================
+  !
+  subroutine init_vv
+    implicit none
+    integer :: i,j,l
+    real(rp) :: h(4)
+    allocate(phv(nkx,nkz,ny),om(nkx,nkz,ny),wa(nkx,nkz,ny),wb(nkx,nkz,ny))
+    allocate(hinv_c(4,nkx,nkz,3),ginv_v(4,nkx,nkz,3),hinv_v(4,nkx,nkz))
+    phv = 0; om = 0; wa = 0; wb = 0; hinv_c = 0; ginv_v = 0; hinv_v = 0
+    !$acc enter data copyin(phv,om,wa,wb,hinv_c,ginv_v,hinv_v)
+    c_cached_vv(:) = -1._rp
+    allocate(dw1(ny),dwn(ny))
+    dw1(:) = 0._rp; dwn(:) = 0._rp
+    if(vv_neumann == 'explicit') then
+      dw1(1:6) = cew1(:); dwn(ny-5:ny) = cewn(:)
+      ndw1 = 6; ndwn = 6
+    else
+      dw1(:) = c1(:); dwn(:) = cn(:)
+      ndw1 = nc1; ndwn = ncn
+    end if
+    !$acc enter data copyin(dw1,dwn)
+    !
+    ! wall corrections of the (k-only) operator  k^2 - D2  used for (D2 - k^2) v = phi
+    !
+    !$acc parallel loop gang vector collapse(2) default(present) private(h) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        if(.not.(ismean(i,j) .or. isnyq(j))) then
+          call hsetup(nkx,nkz,ny,i,j,klh,kuh,kmod(i,j)**2,-1._rp,a2,b2,sx,uf,h)
+          do l=1,4
+            hinv_v(l,i,j) = h(l)
+          end do
+        end if
+      end do
+    end do
+    !$acc wait(1)
+    !
+    ! no pressure in this formulation (statistics of p are zero)
+    !
+    !$acc kernels default(present) async(1)
+    phi(:,:,:) = (0._rp,0._rp)
+    !$acc end kernels
+    !$acc wait(1)
+  end subroutine init_vv
+  !
+  subroutine hsolve_ab(n1,n2,n,i,j,kl,ku,ca,cb,a2,b2,h,g,x,uf,wa_,wb_)
+    !
+    ! as hsolve, but with wall values x(1) = wa_, x(n) = wb_
+    !
+    !$acc routine seq
+    implicit none
+    integer , intent(in) :: n1,n2,n,i,j,kl,ku
+    real(rp), intent(in) :: ca,cb,a2(-1:1,n),b2(-nbw:nbw,n),h(4)
+    complex(rp), intent(in) :: g(n1,n2,n),wa_,wb_
+    complex(rp), intent(inout) :: x(n1,n2,n)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    complex(rp) :: e1,e2,t1,tn
+    call a2rhs(n1,n2,n,i,j,a2,g,x)
+    x(i,j,1) = wa_; x(i,j,n) = wb_
+    call bsolve(n1,n2,n,i,j,kl,ku,ca,cb,a2,b2,.true.,.true.,x,uf)
+    e1 = bmul(n1,n2,n,i,j,1,ca,cb,a2,b2,x) - a2( 1,1)*g(i,j,2)
+    e2 = bmul(n1,n2,n,i,j,n,ca,cb,a2,b2,x) - a2(-1,n)*g(i,j,n-1)
+    t1 = -(h(1)*e1 + h(3)*e2)
+    tn = -(h(2)*e1 + h(4)*e2)
+    call a2rhs(n1,n2,n,i,j,a2,g,x)
+    x(i,j,2)   = x(i,j,2)   + t1*a2(-1,2)
+    x(i,j,n-1) = x(i,j,n-1) + tn*a2( 1,n-1)
+    x(i,j,1) = wa_; x(i,j,n) = wb_
+    call bsolve(n1,n2,n,i,j,kl,ku,ca,cb,a2,b2,.true.,.true.,x,uf)
+  end subroutine hsolve_ab
+  !
+  subroutine vv_state_from_velocity(u,v,w)
+    !
+    ! phi = (D2 - k^2) v and omega_y = i kz u - i kx w (mean columns: U00 in om, W00 in phv)
+    !
+    implicit none
+    complex(rp), intent(in) :: u(nkx,nkz,ny),v(nkx,nkz,ny),w(nkx,nkz,ny)
+    integer :: i,j,r
+    real(rp) :: k2
+    !$acc parallel loop gang vector collapse(2) default(present) private(k2) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        if(ismean(i,j)) then
+          do r=1,ny
+            om(i,j,r) = u(i,j,r); phv(i,j,r) = w(i,j,r)
+          end do
+        else
+          k2 = kmod(i,j)**2
+          call dcol(nkx,nkz,ny,i,j,b2,t2w,t2d,t2u,v,phv)
+          do r=1,ny
+            phv(i,j,r) = phv(i,j,r) - k2*v(i,j,r)
+            om(i,j,r)  = cmplx(0._rp,kzv(j),rp)*u(i,j,r) - cmplx(0._rp,kxv(i),rp)*w(i,j,r)
+          end do
+        end if
+      end do
+    end do
+    !$acc wait(1)
+  end subroutine vv_state_from_velocity
+  !
+  subroutine vv_rhs_terms(nx_,ny_,nz_)
+    !
+    ! (N_x,N_y,N_z) -> h_g (in nx_), h_v (in ny_); mean columns: N_x00 stays in nx_, N_z00 -> ny_
+    !
+    implicit none
+    complex(rp), intent(inout) :: nx_(nkx,nkz,ny),ny_(nkx,nkz,ny),nz_(nkx,nkz,ny)
+    integer :: i,j,r
+    real(rp) :: kx,kz,k2
+    complex(rp) :: zero
+    zero = (0._rp,0._rp)
+    !$acc parallel loop gang vector collapse(2) default(present) private(kx,kz,k2) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        if(isnyq(j)) then
+          do r=1,ny
+            nx_(i,j,r) = zero; ny_(i,j,r) = zero
+          end do
+        else if(ismean(i,j)) then
+          do r=1,ny
+            ny_(i,j,r) = nz_(i,j,r)
+          end do
+        else
+          kx = kxv(i); kz = kzv(j); k2 = kmod(i,j)**2
+          do r=1,ny
+            wb(i,j,r) = cmplx(0._rp,kx,rp)*nx_(i,j,r) + cmplx(0._rp,kz,rp)*nz_(i,j,r)
+          end do
+          call dcol(nkx,nkz,ny,i,j,b1,t1w,t1d,t1u,wb,wa)
+          do r=1,ny
+            ny_(i,j,r) = -k2*ny_(i,j,r) - wa(i,j,r)
+            nx_(i,j,r) = cmplx(0._rp,kz,rp)*nx_(i,j,r) - cmplx(0._rp,kx,rp)*nz_(i,j,r)
+          end do
+        end if
+      end do
+    end do
+  end subroutine vv_rhs_terms
+  !
+  subroutine vv_matrices(q,c)
+    !
+    ! for substep q, c = b_q dt nu: wall corrections of (1 + c k^2) - c D2 and the inverse 2x2 matrix
+    ! [D1 v_a(-1) D1 v_b(-1); D1 v_a(1) D1 v_b(1)] of the homogeneous solutions phi_a (1 at y = -1),
+    ! phi_b (1 at y = +1), v_a,b from (D2 - k^2) v = phi, v = 0 at the walls
+    !
+    implicit none
+    integer , intent(in) :: q
+    real(rp), intent(in) :: c
+    integer :: i,j,r,l,m
+    real(rp) :: kk,ca,cb,h(4),hv(4),mm(2,2),det,s1,s2
+    complex(rp) :: one,zero,wa_,wb_
+    one = (1._rp,0._rp); zero = (0._rp,0._rp)
+    !$acc parallel loop gang vector collapse(2) default(present) private(h,hv,mm) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        if(.not.isnyq(j)) then
+          kk = kmod(i,j)
+          ca = 1._rp + c*kk**2
+          cb = -c
+          call hsetup(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,sx,uf,h)
+          do l=1,4
+            hinv_c(l,i,j,q) = h(l)
+          end do
+          if(.not.ismean(i,j)) then
+            do l=1,4
+              hv(l) = hinv_v(l,i,j)
+            end do
+            do m=1,2
+              do r=1,ny
+                wb(i,j,r) = zero
+              end do
+              wa_ = zero; wb_ = zero
+              if(m == 1) wa_ = one
+              if(m == 2) wb_ = one
+              call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,h,wb,sx,uf,wa_,wb_)
+              do r=1,ny
+                psi(i,j,r) = -sx(i,j,r)
+              end do
+              call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,kk**2,-1._rp,a2,b2,hv,psi,wa,uf,zero,zero)
+              s1 = 0._rp; s2 = 0._rp
+              do r=1,ndw1
+                s1 = s1 + dw1(r)*real(wa(i,j,r),rp)
+              end do
+              do r=ny-ndwn+1,ny
+                s2 = s2 + dwn(r)*real(wa(i,j,r),rp)
+              end do
+              mm(1,m) = s1; mm(2,m) = s2
+            end do
+            det = mm(1,1)*mm(2,2) - mm(1,2)*mm(2,1)
+            ginv_v(1,i,j,q) =  mm(2,2)/det; ginv_v(2,i,j,q) = -mm(2,1)/det
+            ginv_v(3,i,j,q) = -mm(1,2)/det; ginv_v(4,i,j,q) =  mm(1,1)/det
+          end if
+        end if
+      end do
+    end do
+    !$acc wait(1)
+  end subroutine vv_matrices
+  !
+  subroutine vv_step(u,v,w,q,c)
+    !
+    ! on input om and phv hold the right-hand sides of Eqs. (30)-(32); on output om, phv, and the
+    ! velocity u, v, w at the new substep
+    !
+    implicit none
+    complex(rp), intent(inout), dimension(nkx,nkz,ny) :: u,v,w
+    integer , intent(in) :: q
+    real(rp), intent(in) :: c
+    integer :: i,j,r,l
+    real(rp) :: kx,kz,kk,k2,ca,cb,h(4),hv(4)
+    complex(rp) :: zero,d1,dn,cp,cm
+    zero = (0._rp,0._rp)
+    if(c /= c_cached_vv(q)) then
+      call vv_matrices(q,c)
+      c_cached_vv(q) = c
+    end if
+    !$acc parallel loop gang vector collapse(2) default(present) private(h,hv) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        if(isnyq(j)) then
+          do r=1,ny
+            u(i,j,r) = zero; v(i,j,r) = zero; w(i,j,r) = zero; om(i,j,r) = zero; phv(i,j,r) = zero
+          end do
+        else
+          kx = kxv(i); kz = kzv(j); kk = kmod(i,j); k2 = kk**2
+          ca = 1._rp + c*k2
+          cb = -c
+          do l=1,4
+            h(l) = hinv_c(l,i,j,q)
+          end do
+          !
+          ! omega_y (U00 in the mean column)
+          !
+          call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,h,om,sx,uf,zero,zero)
+          do r=1,ny
+            om(i,j,r) = sx(i,j,r)
+          end do
+          if(ismean(i,j)) then
+            ! W00 in the mean column of phv
+            call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,h,phv,sx,uf,zero,zero)
+            do r=1,ny
+              phv(i,j,r) = sx(i,j,r)
+              u(i,j,r) = om(i,j,r); w(i,j,r) = sx(i,j,r); v(i,j,r) = zero
+            end do
+          else
+            do l=1,4
+              hv(l) = hinv_v(l,i,j)
+            end do
+            !
+            ! particular solution: phi_p = 0 at the walls, v_p = 0 at the walls
+            !
+            call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,h,phv,sx,uf,zero,zero)
+            do r=1,ny
+              psi(i,j,r) = -sx(i,j,r)
+            end do
+            call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,k2,-1._rp,a2,b2,hv,psi,wa,uf,zero,zero)
+            d1 = zero; dn = zero
+            do r=1,ndw1
+              d1 = d1 + dw1(r)*wa(i,j,r)
+            end do
+            do r=ny-ndwn+1,ny
+              dn = dn + dwn(r)*wa(i,j,r)
+            end do
+            ! wall values of phi such that D1 v = 0 at both walls
+            cp = -(ginv_v(1,i,j,q)*d1 + ginv_v(3,i,j,q)*dn)
+            cm = -(ginv_v(2,i,j,q)*d1 + ginv_v(4,i,j,q)*dn)
+            call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,h,phv,sx,uf,cp,cm)
+            do r=1,ny
+              psi(i,j,r) = -sx(i,j,r)
+              phv(i,j,r) = sx(i,j,r)
+            end do
+            call hsolve_ab(nkx,nkz,ny,i,j,klh,kuh,k2,-1._rp,a2,b2,hv,psi,v,uf,zero,zero)
+            !
+            ! u and w from continuity and omega_y (Eqs. (12)-(13))
+            !
+            call dcol(nkx,nkz,ny,i,j,b1,t1w,t1d,t1u,v,wa)
+            do r=1,ny
+              u(i,j,r) = (cmplx(0._rp,kx,rp)*wa(i,j,r) - cmplx(0._rp,kz,rp)*om(i,j,r))/k2
+              w(i,j,r) = (cmplx(0._rp,kz,rp)*wa(i,j,r) + cmplx(0._rp,kx,rp)*om(i,j,r))/k2
+            end do
+            u(i,j,1) = zero; u(i,j,ny) = zero; w(i,j,1) = zero; w(i,j,ny) = zero
+          end if
+        end if
+      end do
+    end do
+  end subroutine vv_step
+  !
+  subroutine vv_cfr(u,ub_target,dpdx_eff,coef,c,q)
+    !
+    ! constant flow rate: U00 <- U00 + alpha h with (1 - c D2) h = 1, h = 0 at the walls
+    !
+    implicit none
+    complex(rp), intent(inout) :: u(nkx,nkz,ny)
+    real(rp), intent(in) :: ub_target,coef,c
+    integer , intent(in) :: q
+    real(rp), intent(out) :: dpdx_eff
+    real(rp) :: ub,hb,alpha,h(4)
+    complex(rp) :: zero
+    integer :: r,l
+    dpdx_eff = 0._rp
+    if(.not.mean_owner) return
+    zero = (0._rp,0._rp)
+    !$acc serial default(present) private(h)
+    do l=1,4
+      h(l) = hinv_c(l,i00,j00,q)
+    end do
+    do r=1,ny
+      wb(i00,j00,r) = (1._rp,0._rp)
+    end do
+    call hsolve_ab(nkx,nkz,ny,i00,j00,klh,kuh,1._rp,-c,a2,b2,h,wb,sx,uf,zero,zero)
+    !$acc end serial
+    ub = 0._rp; hb = 0._rp
+    !$acc parallel loop default(present) reduction(+:ub,hb) async(1)
+    do r=1,ny
+      ub = ub + 0.5_rp*wq(r)*real(u(i00,j00,r),rp)
+      hb = hb + 0.5_rp*wq(r)*real(sx(i00,j00,r),rp)
+    end do
+    !$acc wait(1)
+    alpha = (ub_target - ub)/hb
+    !$acc parallel loop default(present) async(1)
+    do r=1,ny
+      u(i00,j00,r)  = u(i00,j00,r)  + alpha*sx(i00,j00,r)
+      om(i00,j00,r) = om(i00,j00,r) + alpha*sx(i00,j00,r)
+    end do
+    dpdx_eff = alpha/coef
+  end subroutine vv_cfr
 end module mod_ysolve

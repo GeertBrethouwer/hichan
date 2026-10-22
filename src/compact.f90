@@ -28,6 +28,8 @@ module mod_compact
   integer , public :: kl1,ku1,kl2,ku2              ! actual bandwidths of B1 and B2
   real(rp), public :: lam2max                      ! spectral radius of D2 with Dirichlet BCs
   real(rp), public :: kappa1                       ! max. modified wavenumber of D1 (uniform grid)
+  real(rp), public :: ew1(6),ewn(6)                ! explicit one-sided 6-point d/dy at y = -1 (points 1..6)
+                                                   ! and y = +1 (points ny-5..ny)
 contains
   subroutine init_grid(ny,grid_type,alpha,grid_file)
     implicit none
@@ -138,12 +140,39 @@ contains
       dyc(j) = min(yg(j+1)-yg(j),yg(j)-yg(j-1))
     end do
     lam2max = spectral_radius_d2(ny)
+    call wall_derivative(yg(1:6),yg(1),ew1)
+    call wall_derivative(yg(ny-5:ny),yg(ny),ewn)
     if(order == 4) then
       kappa1 = 1.74_rp
     else
       kappa1 = 2.0_rp
     end if
   end subroutine init_compact
+  !
+  subroutine wall_derivative(yp,x0,wts)
+    ! weights of the derivative at x0 of the Lagrange polynomial through the points yp(1:6)
+    implicit none
+    real(rp), intent(in)  :: yp(6),x0
+    real(rp), intent(out) :: wts(6)
+    integer :: a,b,c,d
+    real(rp) :: den,s,p
+    do a=1,6
+      den = 1._rp
+      do b=1,6
+        if(b /= a) den = den*(yp(a)-yp(b))
+      end do
+      s = 0._rp
+      do c=1,6
+        if(c == a) cycle
+        p = 1._rp
+        do d=1,6
+          if(d /= a .and. d /= c) p = p*(x0-yp(d))
+        end do
+        s = s + p
+      end do
+      wts(a) = s/den
+    end do
+  end subroutine wall_derivative
   !
   subroutine stencil(i,ny,order,der,nl,lo,nr,ro)
     !
