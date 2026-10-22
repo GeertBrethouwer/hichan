@@ -43,7 +43,9 @@ module mod_param
   ! &init
   !
   character(len=16) :: init_type = 'laminar' ! 'laminar', 'noise', 'restart', 'mode'
-  real(rp) :: init_amp = 0.1_rp
+  real(rp) :: init_amp = 0.1_rp              ! 'noise'/'mode': amplitude; 'largescale': rms of the large scales
+  real(rp) :: init_noise = 0.01_rp           ! 'largescale': rms of the superposed small-scale noise
+  integer  :: ls_nmin = 10, ls_nmax = 40     ! 'largescale': wavelengths L/ls_nmax ... L/ls_nmin in x and z
   integer  :: init_seed = 1
   character(len=256) :: mode_file = 'mode.in'
   integer  :: mode_kx = 1, mode_kz = 0
@@ -100,7 +102,7 @@ contains
     namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
     namelist /physics/ re,forcing,ubulk,dpdx,nl_form,visc_theta,impl_maxit,impl_tol
     namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
-    namelist /init/ init_type,init_amp,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
+    namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
                       mode_log_kx,mode_log_kz
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit
@@ -130,6 +132,7 @@ contains
     if(ny < 9) call abort_run('ny must be at least 9')
     if(all(fd_order /= [4,6])) call abort_run('fd_order must be 4 or 6')
     if(dt <= 0._rp) call abort_run('dt must be > 0')
+    if(ls_nmin < 1 .or. ls_nmax < ls_nmin) call abort_run('&init: 1 <= ls_nmin <= ls_nmax required')
     if(dt_growth < 1._rp) call abort_run('dt_growth must be >= 1')
     if(visc_theta < 0._rp .or. visc_theta > 1._rp) call abort_run('0 <= visc_theta <= 1 required')
     if(any(scal_theta(:) < 0._rp .or. scal_theta(:) > 1._rp)) call abort_run('0 <= scal_theta <= 1 required')
@@ -186,6 +189,10 @@ contains
       write(*,fi) 'nstep',nstep
       if(tmax < huge(1._rp)) write(*,fr) 'tmax',tmax
       write(*,f1) 'initial condition',trim(init_type)
+      if(trim(init_type) == 'largescale') then
+        write(*,fi) '  wavelengths L/n, n from ... to',ls_nmin,min(ls_nmax,nx/2-1),min(ls_nmax,nz/2-1)
+        write(*,fr) '  rms large scales, rms noise',init_amp,init_noise
+      end if
       write(*,fi) 'number of scalars',nscal
       do n=1,nscal
         write(*,'(1x,a,i0,a,es10.3,a,f5.2,a,a1,a,es10.3,a,a1,a,es10.3,a,es10.3)') &

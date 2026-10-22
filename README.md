@@ -248,7 +248,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `dealias` |
 | `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
 | `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
-| `&init` | `init_type` (`laminar`/`noise`/`mode`/`restart`), `init_amp`, `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
+| `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)` |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |

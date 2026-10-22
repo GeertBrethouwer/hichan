@@ -69,10 +69,16 @@
 !------------------------------------------------------------------------------------------------------
   init_type    = 'noise'               ! 'laminar' : laminar Poiseuille profile                       ['laminar']
                                        ! 'noise'   : laminar + random divergence-free perturbations
+                                       ! 'largescale': laminar + large-scale disturbances (wavelengths
+                                       !   L/ls_nmax ... L/ls_nmin in x and z) + small-scale noise
                                        ! 'mode'    : laminar + one Fourier mode read from mode_file
                                        ! 'restart' : continue from restart_file
-  init_amp     = 0.25                  ! 'noise': rms of the perturbations / U_b (velocity unit if    [0.1]
-                                       !   there is no mean flow); 'mode': amplitude of the mode
+  init_amp     = 0.25                  ! 'noise'/'largescale': rms of the (large-scale) perturbations [0.1]
+                                       !   / U_b (velocity unit if there is no mean flow);
+                                       !   'mode': amplitude of the mode
+  init_noise   = 0.01                  ! 'largescale': rms of the small-scale noise / U_b             [0.01]
+  ls_nmin      = 10                    ! 'largescale': wavelengths from L/ls_nmax to L/ls_nmin, L =   [10]
+  ls_nmax      = 40                    !   lx or lz (n = 10..40 -> 1/10 to 1/40 of the box)         [40]
   init_seed    = 1                     ! seed of the (decomposition-independent) random numbers       [1]
   mode_file    = 'mode.in'             ! 'mode': ny lines Re(u) Im(u) Re(v) Im(v) Re(w) Im(w)          ['mode.in']
                                        !   (e.g. from tools/os_mode.py)
