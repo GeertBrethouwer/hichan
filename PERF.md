@@ -62,6 +62,11 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 
 ## 5. Output and diagnostics
 
+- **Measure first:** `timing = .true.` in `&output` prints where the time goes (FFTs, transposes, solves,
+  output; min/max over the ranks shows load imbalance) and writes the time of every step to
+  `timing_steps.dat`. `tools/plot_timing.m` plots it and lists spikes, e.g. from restart writes, slow
+  nodes or network contention. For production runs switch it off, or set `timing_sync = .false.`.
+
 - **`iout_stats`:** every sample computes 11 + 5·nscal statistics profiles, each with a host synchronisation and
   an MPI reduction. Successive steps are strongly correlated anyway, so 50–100 is as useful as 20 and cheaper.
 - **`iout_log`:** every log line computes the divergence (an extra derivative pass and global reductions).

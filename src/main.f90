@@ -22,6 +22,7 @@ program hichan
   use mod_stats
   use mod_io
   use mod_initflow
+  use mod_timer
   implicit none
   integer :: ierr,istep,istep0,ilog,n,nf
   real(rp) :: time,dtcur,divm,t0,t1,tstep,twall0
@@ -91,11 +92,15 @@ program hichan
   !
   is_done = .false.
   t0 = MPI_WTIME()
+  call timing_start
   do while(.not.is_done)
+    call tic(tm_rk)
     call rk_step(time,dtcur)
+    call toc(tm_rk)
     istep = istep+1
     is_done = (istep >= nstep) .or. (time >= tmax)
     if(mod(istep,iout_log) == 0 .or. is_done) then
+      call tic(tm_log)
       divm = divergence_max(u,v,w,tmp1)
       call log_line(ilog,istep,time,dtcur,divm,u,v,w,s,dpdx_applied)
       if(myid == 0) call log_line_stdout()
@@ -109,13 +114,17 @@ program hichan
         if(myid == 0) write(*,'(a)') ' HiCHAN: wall-clock limit reached'
         is_done = .true.
       end if
+      call toc(tm_log)
     end if
+    call tic(tm_stats)
     if(time >= tstats_start .and. iout_stats > 0) then
       if(mod(istep,iout_stats) == 0) call accumulate_stats(u,v,w,s,1._rp/(rk_bet(3)*dtcur),dtcur*iout_stats)
     end if
     if(iout_save_stats > 0) then
       if(mod(istep,iout_save_stats) == 0 .or. is_done) call write_stats(time)
     end if
+    call toc(tm_stats)
+    call tic(tm_io)
     if(iout_restart > 0) then
       if(mod(istep,iout_restart) == 0 .or. is_done) &
         call write_restart(trim(data_dir)//'/restart',time,istep,dtcur,u,v,w,s)
@@ -123,9 +132,12 @@ program hichan
     if(iout_field > 0) then
       if(mod(istep,iout_field) == 0) call output_fields()
     end if
+    call toc(tm_io)
+    call timing_step(istep,time,dtcur,is_done)
   end do
   !$acc wait
   t1 = MPI_WTIME()
+  call timing_report(istep-istep0,real(nx,rp)*ny*nz)
   tstep = (t1-t0)/max(istep-istep0,1)
   if(myid == 0) then
     write(*,'(a,es12.4,a)') ' wall-clock time per time step: ',tstep,' s'

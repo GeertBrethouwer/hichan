@@ -64,6 +64,8 @@ module mod_param
   integer  :: iout_log = 10, iout_stats = 10, iout_save_stats = 1000, iout_restart = 5000, iout_field = 0
   real(rp) :: tstats_start = 0._rp
   integer  :: mode_log_kx = -1, mode_log_kz = 0 ! log the amplitude of one Fourier mode (e.g. for TS waves)
+  logical  :: timing = .false.       ! timers: report at the end, time per step in timing_steps.dat
+  logical  :: timing_sync = .true.   ! timers wait for the GPU (exact attribution, small overhead)
   !
   ! &scalars
   !
@@ -116,7 +118,7 @@ contains
     namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
-                      mode_log_kx,mode_log_kz
+                      mode_log_kx,mode_log_kz,timing,timing_sync
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit
     namelist /buoyancy/ gravity,ri
     namelist /parallel/ pdims,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
@@ -221,6 +223,8 @@ contains
           ', top ',sbc_top(n),' = ',sval_top(n),', Ri = ',ri(n)
       end do
       if(is_buoyant) write(*,fr) 'gravity direction (unit vector)',gvec
+      if(timing) write(*,f1) 'timers (timing_report.txt etc.)',merge('on, GPU-synchronised','on                  ', &
+                                                                     timing_sync)
       write(*,'(a)') ' ===================================================================================='
     end subroutine print_setup
   end subroutine read_input

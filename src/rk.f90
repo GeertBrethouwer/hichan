@@ -15,6 +15,7 @@ module mod_rk
   use mod_decomp , only: nkx,nkz,nzA,nyA,yA_lo,zA_lo
   use mod_fields
   use mod_fft    , only: fwd_fft,bwd_fft
+  use mod_timer  , only: tic,toc,tm_nl,tm_dt,tm_vsolve,tm_ssolve
   use mod_ysolve , only: deriv1,add_lap,pressure_step,scalar_solve,cfr_correct,kxv,kzv,mean_owner,i00,j00, &
                          set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max, &
                          vv_rhs_terms,vv_step,vv_cfr,phv,om
@@ -121,7 +122,9 @@ contains
     call bwd_fft(v,vp)
     call bwd_fft(w,wp)
     dtnew = dt
-    if(is_first .and. .not.fixed_dt) dtnew = compute_dt()
+    if(is_first .and. .not.fixed_dt) then
+      call tic(tm_dt); dtnew = compute_dt(); call toc(tm_dt)
+    end if
     !
     ! scalars first (only up, vp, wp are needed)
     !
@@ -319,7 +322,9 @@ contains
     integer :: q,n
     real(rp) :: dtn,dtg,dtz,dtb,c,dpe,th
     do q=1,3
+      call tic(tm_nl)
       call nonlinear(q == 1,dtn)
+      call toc(tm_nl)
       if(q == 1) then
         !
         ! dtcur: time step of the previous step (initially the input dt, or the dt of the restart file);
@@ -355,14 +360,18 @@ contains
         call rhs_theta(om ,nu,nuo,dtg,dtz,rk_asmr(q)*dtcur*visc)
         call rhs_theta(phv,nv,nvo,dtg,dtz,rk_asmr(q)*dtcur*visc)
         c = rk_bsmr(q)*dtcur*visc
+        call tic(tm_vsolve)
         call vv_step(u,v,w,q,c)
         if(forcing == 'cfr') call vv_cfr(u,ubulk,dpe,dtb,c,q)
+        call toc(tm_vsolve)
       else if(visc_theta == 0._rp) then
         call update(u,nu,nuo,dtg,dtz)
         call update(v,nv,nvo,dtg,dtz)
         call update(w,nw,nwo,dtg,dtz)
+        call tic(tm_vsolve)
         call pressure_step(u,v,w)
         if(forcing == 'cfr') call cfr_correct(u,ubulk,dpe,dtb)
+        call toc(tm_vsolve)
       else
         !
         ! implicit viscous terms (Appendix B.2)
@@ -372,8 +381,10 @@ contains
         call rhs_theta(v,nv,nvo,dtg,dtz,(1._rp-visc_theta)*dtb*visc)
         call rhs_theta(w,nw,nwo,dtg,dtz,(1._rp-visc_theta)*dtb*visc)
         c = visc_theta*dtb*visc
+        call tic(tm_vsolve)
         call pressure_step_implicit(u,v,w,q,c,impl_nit,impl_res)
         if(forcing == 'cfr') call cfr_correct_implicit(u,ubulk,dpe,dtb,c,q)
+        call toc(tm_vsolve)
       end if
       if(forcing == 'cfr') then
         if(q == 3) dpdx_applied = dpe
@@ -393,7 +404,9 @@ contains
           call update(s(:,:,:,n),ns(:,:,:,n),nso(:,:,:,n),dtg,dtz)
           c = 0._rp
         end if
+        call tic(tm_ssolve)
         call scalar_solve(s(:,:,:,n),c,sbc_bot(n),sbc_top(n),sval_bot(n),sval_top(n))
+        call toc(tm_ssolve)
       end do
     end do
     !$acc wait(1)

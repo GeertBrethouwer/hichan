@@ -111,6 +111,11 @@
   tstats_start    = 300.               ! start averaging statistics at this time                      [0.0]
   mode_log_kx     = -1                 ! log the energy of Fourier mode (mode_log_kx, mode_log_kz)    [-1]
   mode_log_kz     = 0                  !   in log.dat (-1: off)                                       [0]
+  timing          = .false.            ! timers: report of the time per part of the code at the end   [.false.]
+                                       !   (stdout + timing_report.txt) and the time of every step
+                                       !   (timing_steps.dat; plot with tools/plot_timing.m)
+  timing_sync     = .true.             ! timers wait for the GPU: exact attribution of the time to    [.true.]
+                                       !   the parts, small overhead (time per step exact anyway)
 /
 
 !------------------------------------------------------------------------------------------------------

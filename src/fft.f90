@@ -13,6 +13,7 @@ module mod_fft
   use mod_types
   use mod_param , only: nxh,nz,ny,mx,mz,abort_run
   use mod_decomp, only: nzA,nyA,nkx,nkz,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb
+  use mod_timer , only: tic,toc,tm_fft,tm_tr
 #if defined(_OPENACC)
   use cufft
   use mod_decomp, only: istream
@@ -81,6 +82,9 @@ contains
     integer :: i,j,k,nzh,off
 #if defined(_OPENACC)
     integer :: istat
+#endif
+    call tic(tm_fft)
+#if defined(_OPENACC)
     !$acc host_data use_device(phys,cxw)
     istat = cufftExecD2Z(plan_xf,phys,cxw)
     !$acc end host_data
@@ -95,7 +99,7 @@ contains
         end do
       end do
     end do
-    call tr_xa2ya(xaw,yaw)
+    call tic(tm_tr); call tr_xa2ya(xaw,yaw); call toc(tm_tr)
 #if defined(_OPENACC)
     !$acc host_data use_device(yaw)
     istat = cufftExecZ2Z(plan_z,yaw,yaw,CUFFT_FORWARD)
@@ -119,7 +123,8 @@ contains
         end do
       end do
     end do
-    call tr_yb2zb(ybw,fh)
+    call tic(tm_tr); call tr_yb2zb(ybw,fh); call toc(tm_tr)
+    call toc(tm_fft)
   end subroutine fwd_fft
   !
   subroutine bwd_fft(fh,phys)
@@ -133,7 +138,8 @@ contains
 #if defined(_OPENACC)
     integer :: istat
 #endif
-    call tr_zb2yb(fh,ybw)
+    call tic(tm_fft)
+    call tic(tm_tr); call tr_zb2yb(fh,ybw); call toc(tm_tr)
     nzh = nz/2
     off = mz-nz
     !$acc parallel loop collapse(3) default(present) async(1)
@@ -157,7 +163,7 @@ contains
 #else
     call fftw_execute_dft(plan_zb,yaw,yaw)
 #endif
-    call tr_ya2xa(yaw,xaw)
+    call tic(tm_tr); call tr_ya2xa(yaw,xaw); call toc(tm_tr)
     !$acc parallel loop collapse(3) default(present) async(1)
     do k=1,nyA
       do j=1,nzA
@@ -177,5 +183,6 @@ contains
 #else
     call fftw_execute_dft_c2r(plan_xb,cxw,phys)
 #endif
+    call toc(tm_fft)
   end subroutine bwd_fft
 end module mod_fft

@@ -39,6 +39,7 @@ src/ysolve.f90     wall-normal column solvers: derivatives, influence-matrix pre
                    velocity-vorticity (phi, omega_y) solver
 src/rk.f90         nonlinear terms (advective or rotational form), RK3 step, CFL
 src/fields.f90     field storage
+src/timer.f90      optional timers: report per code part, time per step
 src/stats.f90      statistics (Parseval, spectral space), log
 src/io.f90         restart files (MPI-IO), 3D fields (MPI-IO + XDMF)
 src/initflow.f90   initial conditions
@@ -50,6 +51,7 @@ examples/          input_reference.nml (every input item, commented), ts_wave (p
 tools/             build_cudecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units),
                    restart_slices.py (2D slices from a restart file -> .mat), plot_slices.m (MATLAB/Octave),
                    mean_tauw.m (time-averaged tau_w, u_tau, Re_tau from log.dat, MATLAB/Octave),
+                   plot_timing.m (time per step and its parts, spikes; with timing = .true.),
                    ygrid.f90 (y and dy, optionally y+ and dy+, for given ny/grid type/alpha: make ygrid;
                    build/ygrid 193 tanh 4.0 395)
 ```
@@ -304,7 +306,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
 | `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
-| `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz` |
+| `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)` |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
 | `&parallel` | `pdims`, `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
@@ -320,6 +322,22 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 * `restart.bin` / `restart.hdr`: spectral fields (global `(nx/2, nz, ny)` complex arrays), independent of the
   number of ranks.
 * `fld_NNNNNNN_*.bin` + `.xmf`: physical fields on the dealiased grid, readable with ParaView/VisIt.
+* With `timing = .true.` (in `&output`):
+  * `timing_report.txt` (also printed at the end of the run): the wall-clock time spent in each part of the
+    code: RK steps, nonlinear terms, time-step limit, velocity solve, scalar solves, FFTs, transposes, log,
+    statistics and output files. For each part it gives the number of calls, the min/mean/max over the MPI
+    ranks (load imbalance), the percentage of the time loop and the time per step. It also gives the
+    distribution of the time per step (min/median/mean/max), the number of steps slower than 2× the median,
+    and the 10 slowest steps with their breakdown.
+  * `timing_steps.dat`: one line per time step. Columns: step, t, Δt, the wall-clock time of the step
+    (slowest rank, fastest rank, mean), and the time of the step spent in FFTs incl. transposes, transposes
+    alone, velocity solve, scalar solves and output (max over the ranks). Plot it with
+    `plot_timing('data/timing_steps.dat')` (`tools/plot_timing.m`, MATLAB/Octave), which also lists the
+    spikes.
+  * `timing_sync = .true.` (default) makes every timer wait for the GPU, so that asynchronous GPU work is
+    attributed to the right part. This costs a little (≈3% on CPU; on the GPU it removes some overlap of
+    kernel launches). With `.false.` the parts are less exact, but the time per step stays exact. The
+    results do not depend on the timing settings.
 
 ## 2D slices for MATLAB
 
