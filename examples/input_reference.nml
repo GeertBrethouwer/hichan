@@ -122,6 +122,12 @@
 &scalars                               ! scalar transport  ds/dt + u.grad(s) = 1/(re pr) lap(s) + Q
 !------------------------------------------------------------------------------------------------------
   nscal = 2                            ! number of scalars (0..16)                                    [0]
+  scal_form = 'advective'              ! advection term of all scalars:                               ['advective']
+                                       !  'advective'  u.grad(s)  (4 FFTs per scalar and RK stage)
+                                       !  'divergence' div(u s)   (4 FFTs; conserves the mean scalar)
+                                       !  'skew'       (u.grad(s) + div(u s))/2 (8 FFTs): conserves the
+                                       !               scalar variance; most robust for under-resolved
+                                       !               scalars, high Pr, active scalars (buoyancy)
   !
   ! scalar 1: passive temperature-like scalar, s = +1 at the bottom wall, -1 at the top wall
   pr(1)         = 0.71                 ! Prandtl/Schmidt number                                       [1.0]

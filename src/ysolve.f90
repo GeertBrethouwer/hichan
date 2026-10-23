@@ -29,15 +29,17 @@ module mod_ysolve
   use mod_decomp, only: nkx,nkz,kx_lo,kz_lo
   use mod_compact, only: nbw,ca1 => a1,cb1 => b1,ca2 => a2,cb2 => b2,ct1w => t1w,ct1d => t1d,ct1u => t1u, &
                          ct2w => t2w,ct2d => t2d,ct2u => t2u,cc1 => c1,ccn => cn,cnc1 => nc1,cncn => ncn, &
-                         cwq => wq,ckl1 => kl1,cku1 => ku1,ckl2 => kl2,cku2 => ku2,cew1 => ew1,cewn => ewn
+                         cwq => wq,ckl1 => kl1,cku1 => ku1,ckl2 => kl2,cku2 => ku2,cew1 => ew1,cewn => ewn, &
+                         cb1m => b1m,ct1mw => t1mw,ct1md => t1md,ct1mu => t1mu,crxi => rxi
   implicit none
   private
-  public :: init_ysolve,deriv1,add_lap,pressure_step,scalar_solve,cfr_correct,divergence_max, &
+  public :: init_ysolve,deriv1,deriv1m,add_lap,pressure_step,scalar_solve,cfr_correct,divergence_max, &
             wall_gradient,mean_owner,i00,j00,kxv,kzv,kmod,ismean, &
             init_implicit,set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max, &
             init_vv,vv_state_from_velocity,vv_rhs_terms,vv_step,vv_cfr
   real(rp), allocatable, public :: a1(:,:),b1(:,:),a2(:,:),b2(:,:)
   real(rp), allocatable :: t1w(:),t1d(:),t1u(:),t2w(:),t2d(:),t2u(:)
+  real(rp), allocatable :: b1m(:,:),t1mw(:),t1md(:),t1mu(:),rxi(:)
   real(rp), allocatable, public :: c1(:),cn(:),wq(:)
   integer :: nc1,ncn,klq,kuq,klh,kuh
   real(rp), allocatable :: kxv(:),kzv(:),kmod(:,:)
@@ -78,6 +80,9 @@ contains
     klq = max(ckl1,1); kuq = max(cku1,1)
     klh = max(ckl2,1); kuh = max(cku2,1)
     !$acc enter data copyin(a1,b1,a2,b2,t1w,t1d,t1u,t2w,t2d,t2u,c1,cn,wq)
+    allocate(b1m,source=cb1m); allocate(rxi,source=crxi)
+    allocate(t1mw,source=ct1mw); allocate(t1md,source=ct1md); allocate(t1mu,source=ct1mu)
+    !$acc enter data copyin(b1m,t1mw,t1md,t1mu,rxi)
     allocate(kxv(nkx),kzv(nkz),kmod(nkx,nkz),ismean(nkx,nkz),isnyq(nkz))
     do i=1,nkx
       ig = kx_lo+i-1
@@ -473,6 +478,35 @@ contains
     end do
     dpdx_eff = du/coef
   end subroutine cfr_correct
+  !
+  subroutine deriv1m(f,df)
+    ! df = D1m f = diag(1/y_xi) A1u^{-1} B1u f: compact derivative on the uniform grid xi, mapped to y
+    implicit none
+    complex(rp), intent(in)  :: f(nkx,nkz,ny)
+    complex(rp), intent(out) :: df(nkx,nkz,ny)
+    integer :: i,j,r,o
+    complex(rp) :: s
+    !$acc parallel loop gang vector collapse(2) default(present) private(s) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        do r=1,ny
+          s = (0._rp,0._rp)
+          do o=max(-nbw,1-r),min(nbw,ny-r)
+            s = s + b1m(o,r)*f(i,j,r+o)
+          end do
+          if(r > 1) s = s - t1mw(r)*df(i,j,r-1)
+          df(i,j,r) = s
+        end do
+        df(i,j,ny) = df(i,j,ny)*t1md(ny)
+        do r=ny-1,1,-1
+          df(i,j,r) = (df(i,j,r) - t1mu(r)*df(i,j,r+1))*t1md(r)
+        end do
+        do r=1,ny
+          df(i,j,r) = rxi(r)*df(i,j,r)
+        end do
+      end do
+    end do
+  end subroutine deriv1m
   !
   subroutine deriv1(f,df)
     ! df = D1 f = A1^{-1} B1 f

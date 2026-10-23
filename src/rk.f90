@@ -16,7 +16,7 @@ module mod_rk
   use mod_fields
   use mod_fft    , only: fwd_fft,bwd_fft
   use mod_timer  , only: tic,toc,tm_nl,tm_dt,tm_vsolve,tm_ssolve
-  use mod_ysolve , only: deriv1,add_lap,pressure_step,scalar_solve,cfr_correct,kxv,kzv,mean_owner,i00,j00, &
+  use mod_ysolve , only: deriv1,deriv1m,add_lap,pressure_step,scalar_solve,cfr_correct,kxv,kzv,mean_owner,i00,j00, &
                          set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max, &
                          vv_rhs_terms,vv_step,vv_cfr,phv,om
   use mod_compact, only: kappa1,lam2max
@@ -97,27 +97,67 @@ contains
     end if
   end subroutine phys_prod
   !
-  subroutine advect(f)
-    ! ap = -(u df/dx + v df/dy + w df/dz) in physical space (advective form)
+  subroutine advect(f,fac,metric)
+    ! ap = fac*(u df/dx + v df/dy + w df/dz) in physical space (advective form);
+    ! metric: d/dy through the uniform computational grid (deriv1m) instead of the compact D1
     implicit none
     complex(rp), intent(in)  :: f(nkx,nkz,ny)
+    real(rp)   , intent(in)  :: fac
+    logical    , intent(in)  :: metric
     call spec_mul(f,tmp1,1._rp,0._rp)
     call bwd_fft(tmp1,gp(:,:,:,1))
-    call phys_prod(up,gp(:,:,:,1),ap,-1._rp,.false.)
-    call deriv1(f,tmp1)
+    call phys_prod(up,gp(:,:,:,1),ap,fac,.false.)
+    if(metric) then
+      call deriv1m(f,tmp1)
+    else
+      call deriv1(f,tmp1)
+    end if
     call bwd_fft(tmp1,gp(:,:,:,1))
-    call phys_prod(vp,gp(:,:,:,1),ap,-1._rp,.true.)
+    call phys_prod(vp,gp(:,:,:,1),ap,fac,.true.)
     call spec_mul(f,tmp1,0._rp,1._rp)
     call bwd_fft(tmp1,gp(:,:,:,1))
-    call phys_prod(wp,gp(:,:,:,1),ap,-1._rp,.true.)
+    call phys_prod(wp,gp(:,:,:,1),ap,fac,.true.)
   end subroutine advect
+  !
+  subroutine add_flux_div(f,nf,fac,metric)
+    ! nf <- nf + fac*div(u f) (divergence form; up, vp, wp hold the velocity in physical space)
+    implicit none
+    complex(rp), intent(in)    :: f(nkx,nkz,ny)
+    complex(rp), intent(inout) :: nf(nkx,nkz,ny)
+    real(rp)   , intent(in)    :: fac
+    logical    , intent(in)    :: metric
+    integer :: i,j,k
+    call bwd_fft(f,gp(:,:,:,1))
+    call phys_prod(up,gp(:,:,:,1),gp(:,:,:,2),1._rp,.false.)
+    call fwd_fft(gp(:,:,:,2),tmp1)
+    call spec_axpy(tmp1,nf,fac,0._rp,1._rp)             ! + fac i kx (u f)
+    call phys_prod(wp,gp(:,:,:,1),gp(:,:,:,2),1._rp,.false.)
+    call fwd_fft(gp(:,:,:,2),tmp1)
+    call spec_axpy(tmp1,nf,0._rp,fac,1._rp)             ! + fac i kz (w f)
+    call phys_prod(vp,gp(:,:,:,1),gp(:,:,:,2),1._rp,.false.)
+    call fwd_fft(gp(:,:,:,2),tmp1)
+    if(metric) then
+      call deriv1m(tmp1,tmp2)
+    else
+      call deriv1(tmp1,tmp2)
+    end if
+    !$acc parallel loop collapse(3) default(present) async(1)
+    do k=1,ny
+      do j=1,nkz
+        do i=1,nkx
+          nf(i,j,k) = nf(i,j,k) + fac*tmp2(i,j,k)       ! + fac D1 (v f)
+        end do
+      end do
+    end do
+  end subroutine add_flux_div
   !
   subroutine nonlinear(is_first,dtnew)
     implicit none
     logical , intent(in)  :: is_first
     real(rp), intent(out) :: dtnew
     integer :: n,i,j,k
-    real(rp) :: qc,qu
+    real(rp) :: qc,qu,fa
+    logical  :: skew
     call bwd_fft(u,up)
     call bwd_fft(v,vp)
     call bwd_fft(w,wp)
@@ -128,8 +168,30 @@ contains
     !
     ! scalars first (only up, vp, wp are needed)
     !
+    !
+    ! scal_form: 'advective' -u.grad(s), 'divergence' -div(u s), 'skew' the average of both. With
+    ! div(u) = 0 they are equal analytically. The skew-symmetric form conserves the scalar variance
+    ! discretely: exactly in x and z (Fourier, dealiased), and in y because its d/dy is taken on the
+    ! uniform computational grid and mapped (deriv1m), which is skew-adjoint in the interior; the
+    ! compact D1 computed directly on a stretched grid is not
+    !
+    skew = .false.
+    select case(scal_form)
+    case('divergence')
+      fa = 0._rp
+    case('skew')
+      fa = 0.5_rp; skew = .true.
+    case default
+      fa = 1._rp
+    end select
     do n=1,nscal
-      call advect(s(:,:,:,n))
+      if(fa > 0._rp) then
+        call advect(s(:,:,:,n),-fa,skew)
+      else
+        !$acc kernels default(present) async(1)
+        ap(:,:,:) = 0._rp
+        !$acc end kernels
+      end if
       qc = ssrc_const(n); qu = ssrc_u(n)/ubulk
       if(qc /= 0._rp .or. qu /= 0._rp) then
         !$acc parallel loop collapse(3) default(present) async(1)
@@ -142,17 +204,18 @@ contains
         end do
       end if
       call fwd_fft(ap,ns(:,:,:,n))
+      if(fa < 1._rp) call add_flux_div(s(:,:,:,n),ns(:,:,:,n),fa-1._rp,skew)
       if(scal_theta(n) == 0._rp) call add_lap(s(:,:,:,n),ns(:,:,:,n),diff(n),tmp1)
     end do
     !
     ! momentum
     !
     if(trim(nl_form) == 'advective') then
-      call advect(u)
+      call advect(u,-1._rp,.false.)
       call fwd_fft(ap,nu)
-      call advect(v)
+      call advect(v,-1._rp,.false.)
       call fwd_fft(ap,nv)
-      call advect(w)
+      call advect(w,-1._rp,.false.)
       call fwd_fft(ap,nw)
     else
       ! omega_x = dw/dy - dv/dz

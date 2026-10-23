@@ -28,6 +28,9 @@ module mod_compact
   integer , public :: kl1,ku1,kl2,ku2              ! actual bandwidths of B1 and B2
   real(rp), public :: lam2max                      ! spectral radius of D2 with Dirichlet BCs
   real(rp), public :: kappa1                       ! max. modified wavenumber of D1 (uniform grid)
+  real(rp), allocatable, public :: b1m(:,:)        ! (-nbw:nbw,ny) compact d/dxi on the uniform grid xi
+  real(rp), allocatable, public :: t1mw(:),t1md(:),t1mu(:) ! Thomas factors of its LHS
+  real(rp), allocatable, public :: rxi(:)          ! 1/(dy/dxi): D1m = diag(rxi) D_xi (metric first derivative)
   real(rp), public :: ew1(6),ewn(6)                ! explicit one-sided 6-point d/dy at y = -1 (points 1..6)
                                                    ! and y = +1 (points ny-5..ny)
 contains
@@ -132,6 +135,7 @@ contains
     end do
     nc1 = max(nc1,2); ncn = max(ncn,2)
     !
+    call init_metric_derivative(ny,order)
     call init_quadrature(ny,order)
     allocate(dyc(ny))
     dyc(1)  = yg(2)-yg(1)
@@ -148,6 +152,39 @@ contains
       kappa1 = 2.0_rp
     end if
   end subroutine init_compact
+  !
+  subroutine init_metric_derivative(ny,order)
+    !
+    ! first derivative through the uniform computational grid xi_j = -1 + 2(j-1)/(ny-1):
+    ! D1m = diag(1/y_xi) A1u^{-1} B1u, with the compact scheme (A1u, B1u) of the uniform grid and
+    ! y_xi = A1u^{-1} B1u y. Its interior part is skew-adjoint in the weights y_xi*dxi, which the direct
+    ! compact D1 on a stretched grid is not; used in the skew-symmetric scalar advection.
+    !
+    implicit none
+    integer, intent(in) :: ny,order
+    real(rp), allocatable :: ysave(:),a1m(:,:),g(:)
+    integer :: i
+    allocate(b1m(-nbw:nbw,ny),a1m(-1:1,ny),t1mw(ny),t1md(ny),t1mu(ny),rxi(ny),g(ny))
+    allocate(ysave,source=yg)
+    do i=1,ny
+      yg(i) = -1._rp + 2._rp*(i-1)/real(ny-1,rp)
+    end do
+    do i=1,ny
+      call row_coeffs(i,ny,order,1,a1m(:,i),b1m(:,i))
+    end do
+    yg(:) = ysave(:)
+    call thomas_factor(ny,a1m,t1mw,t1md,t1mu)
+    call mat_band_apply(ny,nbw,b1m,yg,g)
+    do i=2,ny
+      g(i) = g(i) - t1mw(i)*g(i-1)
+    end do
+    g(ny) = g(ny)*t1md(ny)
+    do i=ny-1,1,-1
+      g(i) = (g(i) - t1mu(i)*g(i+1))*t1md(i)
+    end do
+    if(any(g <= 0._rp)) call abort_run('grid is not monotonic: dy/dxi <= 0')
+    rxi(:) = 1._rp/g(:)
+  end subroutine init_metric_derivative
   !
   subroutine wall_derivative(yp,x0,wts)
     ! weights of the derivative at x0 of the Lagrange polynomial through the points yp(1:6)

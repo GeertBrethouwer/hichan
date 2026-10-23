@@ -146,7 +146,24 @@ is no pressure coupling. The explicit part `(1−θ)` and the right-hand side fo
   the rotational form stayed stable. Restarted from the developed turbulent field, it ran stably. Use it at DNS
   resolution, or start transition with the rotational form.
 
-Each scalar adds 4 FFTs and uses the advective form. The time step comes from the RK3 stability limits: CFL
+**Scalar advection** (`scal_form` in `&scalars`):
+
+* `'advective'` (default): `u·∇s`, 4 FFTs per scalar and RK stage.
+* `'divergence'`: `∇·(u s)`. Also 4 FFTs. It conserves the mean scalar exactly, but not the variance.
+* `'skew'`: `½[u·∇s + ∇·(u s)]`, 8 FFTs. It **conserves the scalar variance ∫s² discretely**, so grid-scale
+  scalar fluctuations cannot grow through advection. This is the robust choice for under-resolved scalars:
+  high Péclet number at the grid scale, Pr > 1, or active scalars, where scalar noise feeds back into the
+  flow.
+  * In x and z the dealiased Fourier products give exact conservation.
+  * In y, conservation requires a first derivative that is skew-adjoint with respect to a positive quadrature.
+    The compact D1 built directly on a stretched grid is far from that: for tanh, α_s = 3, its interior
+    non-skewness is O(0.4), and even the skew-symmetric form then lets the variance grow. The skew form
+    therefore uses `D1m = (dy/dξ)⁻¹ D_ξ`, the same compact scheme applied on the uniform computational grid
+    ξ and mapped to y. Its interior is skew-adjoint to 1e-7 in the weights `(dy/dξ)Δξ`.
+  * D1m converges at the same rate as D1, but on strongly stretched grids its error constant is larger
+    (2–30× for α_s = 2–3). The momentum equations always use the compact D1.
+
+With the default form each scalar adds 4 FFTs. The time step comes from the RK3 stability limits: CFL
 `cfl` (< √3) and explicit diffusion `cfl_visc` (< 2.51). The spectral radius of `D2` is computed numerically on
 the actual grid.
 
@@ -248,6 +265,8 @@ buoyancy force.
 | `'vv'`, vertical channel natural convection | steady profile to 1.6e-6, v = 0 exactly |
 | `'vv'` vs `'im'`, turbulent channel Re_b = 2800, 32×65×32 (very coarse), from noise to t = 200, average over 170–200 | both stable through transition. Re_τ 200.8 vs 202.1, centreline U⁺ 16.13 vs 16.10, u_rms⁺ peak 2.68 vs 2.67 (short average, coarse grid). The same cost per step on CPU; `div_max` of `'vv'` (explicit wall derivative) ≈ 5e-3 in the wall rows on this coarse grid, interior at round-off |
 | `'vv'`, 3D with oblique gravity, two active scalars | identical on 1, 3 and 4 ranks and with the OpenACC build |
+| `scal_form = 'skew'`, inviscid scalars (Pr = 1e10) in the coarse turbulent channel (32×65×32, Re_τ ≈ 180, tanh α_s = 3), t = 0–8 | ∫s² constant to 1% (explicit diffusion) and to 0.3% up to t = 30 (θ = 0.5). The advective and divergence forms grow by 10²–10⁵ and blow up. Skew-symmetric with the compact D1 instead of D1m also grows ×1000, which is why the skew form uses D1m |
+| `scal_form = 'skew'`, Pr = 0.71, same flow | wall gradients agree with the advective form to 0.1–0.3% (truncation level on this coarse grid); identical on 1, 3 and 4 ranks and with the OpenACC build |
 | Restart | 20 steps straight vs. 10 + restart + 10 (restarting on 3 instead of 2 ranks): bit-identical |
 | OpenACC code path | built with `gfortran -fopenacc` (host fallback), with cuFFT emulated by FFTW using the same layout parameters: results identical to the CPU build |
 
@@ -307,7 +326,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
-| `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)` |
+| `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
 | `&parallel` | `pdims`, `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
 

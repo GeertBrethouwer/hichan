@@ -12,7 +12,8 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 - **`nl_form = 'rotational'`** (default): 9 FFT+transpose pairs per RK stage for the velocity, against 15 for
   `'advective'`. That's about 40% fewer transforms, and it is also the more robust form.
 - **Number of scalars:** each scalar adds 4 transforms per stage. With 2 scalars the transform count rises from
-  9 to 17.
+  9 to 17. With `scal_form = 'skew'` each scalar costs 8 transforms (2 scalars: 9 → 25). It is
+  worth it when the scalars limit the stability; otherwise keep `'advective'`.
 - **`dealias = .true.`:** keep it for DNS. Switching it off makes the physical grid 2.25× smaller, but brings back
   aliasing errors.
 

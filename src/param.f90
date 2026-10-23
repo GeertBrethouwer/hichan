@@ -77,6 +77,9 @@ module mod_param
   real(rp) :: ssrc_const(nscal_max) = 0._rp      ! volumetric source  Q_c
   real(rp) :: ssrc_u(nscal_max) = 0._rp          ! source  Q_u*u/ubulk (e.g. uniform-heat-flux channels)
   character(len=16) :: sinit(nscal_max) = 'linear' ! 'linear', 'zero', 'noise'
+  character(len=12) :: scal_form = 'advective' ! scalar advection: 'advective' u.grad(s), 'divergence'
+                                               ! div(u s), or 'skew' (average of both: conserves the
+                                               ! scalar variance, more robust, 8 instead of 4 FFTs)
   !
   ! &buoyancy (Boussinesq): momentum source  - sum_n ri(n) * s_n * e_g
   !
@@ -119,7 +122,7 @@ contains
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
                       mode_log_kx,mode_log_kz,timing,timing_sync
-    namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit
+    namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit,scal_form
     namelist /buoyancy/ gravity,ri
     namelist /parallel/ pdims,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
     !
@@ -155,6 +158,8 @@ contains
     if(nscal < 0 .or. nscal > nscal_max) call abort_run('0 <= nscal <= 16 required')
     if(all(forcing /= ['cfr','cpg'])) call abort_run('forcing must be cfr or cpg')
     if(all(nl_form /= ['advective ','rotational'])) call abort_run('nl_form must be advective or rotational')
+    if(all(scal_form /= ['advective ','divergence','skew      '])) &
+      call abort_run("scal_form must be 'advective', 'divergence' or 'skew'")
     nxh = nx/2
     if(dealias) then
       mx = 3*nx/2
@@ -217,6 +222,7 @@ contains
         write(*,fr) '  rms large scales, rms noise',init_amp,init_noise
       end if
       write(*,fi) 'number of scalars',nscal
+      if(nscal > 0) write(*,f1) 'scalar advection form',trim(scal_form)
       do n=1,nscal
         write(*,'(1x,a,i0,a,es10.3,a,f5.2,a,a1,a,es10.3,a,a1,a,es10.3,a,es10.3)') &
           '  scalar ',n,': Pr = ',pr(n),', theta = ',scal_theta(n),', bottom ',sbc_bot(n),' = ',sval_bot(n), &
