@@ -13,14 +13,20 @@
 ! in the y-pencil axis 1 over p1 and axis 3 over p2, in the z-pencil axis 1 over p1
 ! and axis 2 over p2 (same convention as 2DECOMP&FFT and cuDecomp).
 !
-! With -D_USE_CUDECOMP the transposes are done by NVIDIA cuDecomp (as in CaNS, with
-! autotuning of the process grid and of the communication backend: MPI, NCCL, NVSHMEM).
-! Otherwise a portable MPI_Alltoallv implementation is used (CUDA-aware MPI on GPUs).
+! Transpose libraries, chosen at run time with transpose_lib in &parallel:
+!   'cudecomp'   NVIDIA cuDecomp (as in CaNS; autotuning of the process grid and of the backend:
+!                MPI, NCCL, NVSHMEM); needs -D_USE_CUDECOMP (make CUDECOMP=1)
+!   'diezdecomp' diezDecomp (R. Diez Sanhueza, J. Peeters, P. Costa, Comput. Phys. Commun. 316
+!                (2025) 109811; github.com/Rafael10Diez/diezDecomp): OpenACC packing and
+!                autotuned MPI_Isend/Irecv, local copies without MPI; needs -D_USE_DIEZDECOMP
+!                (make DIEZDECOMP=1)
+!   'mpi'        portable MPI_Alltoallv (CUDA-aware MPI on GPUs); always available
+! 'mpi' and 'diezdecomp' use the block distribution of init_mpi_layout; cuDecomp its own.
 !
 module mod_decomp
   use mpi
   use mod_types
-  use mod_param, only: nxh,mx,mz,nz,ny,pdims,abort_run, &
+  use mod_param, only: nxh,mx,mz,nz,ny,pdims,abort_run,transpose_lib, &
                        cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
 #if defined(_OPENACC)
   use openacc
@@ -28,11 +34,18 @@ module mod_decomp
 #if defined(_USE_CUDECOMP)
   use cudecomp
 #endif
+#if defined(_USE_DIEZDECOMP)
+  use diezdecomp_api_generic, only: diezdecomp_props_transp,diezdecomp_parsed_mpi_ranks, &
+                                    diezdecomp_track_mpi_decomp,diezdecomp_generic_fill_tr_obj, &
+                                    diezdecomp_transp_execute_generic_nobuf
+#endif
   implicit none
   private
   public :: init_decomp,finalize_decomp,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb
   integer, public :: myid,nproc,p1,p2,cx1,cx2
   integer, public :: zA_lo,nzA,yA_lo,nyA,kx_lo,nkx,kz_lo,nkz
+  integer, parameter :: TL_MPI = 1, TL_CUDECOMP = 2, TL_DIEZ = 3
+  integer :: tlib = TL_MPI
 #if defined(_OPENACC)
   integer(acc_handle_kind), public :: istream
 #endif
@@ -41,7 +54,7 @@ module mod_decomp
   type(cudecompGridDesc) :: gd_a,gd_b
   complex(rp), pointer, contiguous :: work(:)
   complex(rp), pointer, contiguous, device :: work_d(:)
-#else
+#endif
   integer :: comm_row,comm_col
   integer, allocatable :: kxlo_r(:),nkx_r(:),zlo_r(:),nz_r(:)   ! per peer in the row communicator
   integer, allocatable :: kzlo_c(:),nkz_c(:),ylo_c(:),ny_c(:)   ! per peer in the column communicator
@@ -49,6 +62,13 @@ module mod_decomp
   integer, allocatable :: sc_xy(:),sd_xy(:),rc_xy(:),rd_xy(:)
   integer, allocatable :: sc_yz(:),sd_yz(:),rc_yz(:),rd_yz(:)
   complex(rp), allocatable :: sbuf(:),rbuf(:)
+#if defined(_USE_DIEZDECOMP)
+  ! diezDecomp works on real arrays: real and imaginary parts are stacked along the axis that a
+  ! transpose does not redistribute (y for grid A, kx for grid B), so each complex transpose is one
+  ! real transpose of the same data volume
+  type(diezdecomp_props_transp), save :: dz_tr(4)        ! xa->ya, ya->xa, yb->zb, zb->yb
+  ! (diezDecomp runs on its default OpenACC queue 1, the queue of all HiCHAN kernels)
+  real(rp), allocatable, target :: dz_in(:),dz_out(:)
 #endif
 contains
   subroutine init_decomp
@@ -65,15 +85,47 @@ contains
 #if defined(_OPENACC)
     call init_device
 #endif
+    select case(trim(transpose_lib))
+    case('auto')
 #if defined(_USE_CUDECOMP)
-    call init_cudecomp
+      tlib = TL_CUDECOMP
+#elif defined(_USE_DIEZDECOMP)
+      tlib = TL_DIEZ
 #else
-    call init_mpi_transposes
+      tlib = TL_MPI
 #endif
+    case('cudecomp')
+#if !defined(_USE_CUDECOMP)
+      call abort_run("transpose_lib = 'cudecomp', but HiCHAN was built without cuDecomp (make CUDECOMP=1)")
+#endif
+      tlib = TL_CUDECOMP
+    case('diezdecomp')
+#if !defined(_USE_DIEZDECOMP)
+      call abort_run("transpose_lib = 'diezdecomp', but HiCHAN was built without diezDecomp (make DIEZDECOMP=1)")
+#endif
+      tlib = TL_DIEZ
+    case('mpi')
+      tlib = TL_MPI
+    case default
+      call abort_run("transpose_lib must be 'auto', 'cudecomp', 'diezdecomp' or 'mpi'")
+    end select
 #if defined(_OPENACC)
     istream = acc_get_cuda_stream(1)
 #endif
+    if(tlib == TL_CUDECOMP) then
+#if defined(_USE_CUDECOMP)
+      call init_cudecomp
+#endif
+    else
+      call init_mpi_layout
+      if(tlib == TL_MPI) call init_mpi_transposes
+#if defined(_USE_DIEZDECOMP)
+      if(tlib == TL_DIEZ) call init_diezdecomp
+#endif
+    end if
     if(myid == 0) then
+      write(*,'(a,a)') ' transposes: ',trim(merge('cuDecomp  ',merge('diezDecomp','MPI       ',tlib == TL_DIEZ), &
+                                                 tlib == TL_CUDECOMP))
       write(*,'(a,i0,a,i0)') ' process grid p1 x p2 = ',p1,' x ',p2
     end if
   end subroutine init_decomp
@@ -164,10 +216,10 @@ contains
     end if
   end subroutine distribute
   !
-#if !defined(_USE_CUDECOMP)
-  subroutine init_mpi_transposes
+  subroutine init_mpi_layout
+    ! block distribution on the process grid p1 x p2 (used by the 'mpi' and 'diezdecomp' transposes)
     implicit none
-    integer :: dims(2),ierr,p,i
+    integer :: dims(2),ierr,p
     if(all(pdims(:) > 0)) then
       if(pdims(1)*pdims(2) /= nproc) call abort_run('pdims(1)*pdims(2) /= number of MPI processes')
       dims(:) = pdims(:)
@@ -206,6 +258,11 @@ contains
       own_kz(kzlo_c(p):kzlo_c(p)+nkz_c(p)-1) = p
       own_y(ylo_c(p):ylo_c(p)+ny_c(p)-1) = p
     end do
+  end subroutine init_mpi_layout
+  !
+  subroutine init_mpi_transposes
+    implicit none
+    integer :: p,i
     allocate(sc_xy(0:p1-1),sd_xy(0:p1-1),rc_xy(0:p1-1),rd_xy(0:p1-1))
     allocate(sc_yz(0:p2-1),sd_yz(0:p2-1),rc_yz(0:p2-1),rd_yz(0:p2-1))
     do p=0,p1-1
@@ -230,6 +287,37 @@ contains
     !$acc enter data copyin(kxlo_r,nkx_r,zlo_r,nz_r,kzlo_c,nkz_c,ylo_c,ny_c, &
     !$acc                   own_kx,own_z,own_kz,own_y,sd_xy,rd_xy,sd_yz,rd_yz) create(sbuf,rbuf)
   end subroutine init_mpi_transposes
+  !
+#if defined(_USE_DIEZDECOMP)
+  subroutine init_diezdecomp
+    !
+    ! global axes 0 = kx, 1 = z (kz), 2 = y; memory orders: x-pencil (0,1,2), y-pencil (1,2,0),
+    ! z-pencil (0,1,2). Rank coordinates (x,y,z order) in the three pencils: (0,cx1,cx2),
+    ! (cx1,0,cx2), (cx1,cx2,0). The real arrays have the stacked axis doubled.
+    !
+    implicit none
+    type(diezdecomp_parsed_mpi_ranks) :: rkx,rky,rkz
+    integer :: ox(0:2),oy(0:2),oz(0:2),z6(0:2,0:1),sxa(0:2),sya(0:2),syb(0:2),szb(0:2)
+    integer(i8) :: ws
+    integer :: n
+    ox = [0,1,2]; oy = [1,2,0]; oz = [0,1,2]; z6 = 0
+    call diezdecomp_track_mpi_decomp([0,cx1,cx2],rkx,myid,nproc)
+    call diezdecomp_track_mpi_decomp([cx1,0,cx2],rky,myid,nproc)
+    call diezdecomp_track_mpi_decomp([cx1,cx2,0],rkz,myid,nproc)
+    sxa = [nxh,nzA,2*nyA]      ! xa: re/im stacked along y
+    sya = [mz,2*nyA,nkx]       ! ya
+    syb = [nz,nyA,2*nkx]       ! yb: re/im stacked along kx
+    szb = [2*nkx,nkz,ny]       ! zb
+    call diezdecomp_generic_fill_tr_obj(dz_tr(1),rkx,rky,sxa,z6,sya,z6,ox,oy,oy,.false.,-1,-1,ws,.false.)
+    call diezdecomp_generic_fill_tr_obj(dz_tr(2),rky,rkx,sya,z6,sxa,z6,oy,ox,ox,.false.,-1,-1,ws,.false.)
+    call diezdecomp_generic_fill_tr_obj(dz_tr(3),rky,rkz,syb,z6,szb,z6,oy,oz,oz,.false.,-1,-1,ws,.false.)
+    call diezdecomp_generic_fill_tr_obj(dz_tr(4),rkz,rky,szb,z6,syb,z6,oz,oy,oy,.false.,-1,-1,ws,.false.)
+    ! the 'nobuf' execution uses p_out to pack the input and p_in to receive: both need max size
+    n = max(product(sxa),product(sya),product(syb),product(szb))
+    allocate(dz_in(0:n-1),dz_out(0:n-1))
+    dz_in(:) = 0._rp; dz_out(:) = 0._rp
+    !$acc enter data copyin(dz_in,dz_out)
+  end subroutine init_diezdecomp
 #endif
   !
 #if defined(_USE_CUDECOMP)
@@ -327,135 +415,238 @@ contains
     implicit none
     complex(rp), intent(in ) :: xa(nxh,nzA,nyA)
     complex(rp), intent(out) :: ya(mz,nyA,nkx)
+    integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
-    !$acc host_data use_device(xa,ya,work)
-    istat = cudecompTransposeXToY(ch,gd_a,xa,ya,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
-    !$acc end host_data
-#else
-    integer :: i,j,k,p
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do k=1,nyA
-      do j=1,nzA
-        do i=1,nxh
-          p = own_kx(i)
-          sbuf(sd_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1))) = xa(i,j,k)
-        end do
-      end do
-    end do
-    call alltoallv(sbuf,sc_xy,sd_xy,rbuf,rc_xy,rd_xy,comm_row)
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do i=1,nkx
-      do k=1,nyA
-        do j=1,mz
-          p = own_z(j)
-          ya(j,k,i) = rbuf(rd_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1)))
-        end do
-      end do
-    end do
 #endif
+    select case(tlib)
+#if defined(_USE_CUDECOMP)
+    case(TL_CUDECOMP)
+      !$acc host_data use_device(xa,ya,work)
+      istat = cudecompTransposeXToY(ch,gd_a,xa,ya,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+      !$acc end host_data
+#endif
+#if defined(_USE_DIEZDECOMP)
+    case(TL_DIEZ)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do k=1,nyA
+        do j=1,nzA
+          do i=1,nxh
+            dz_in(i-1+nxh*(j-1+nzA*(k-1)))     = real(xa(i,j,k),rp)
+            dz_in(i-1+nxh*(j-1+nzA*(k-1+nyA))) = aimag(xa(i,j,k))
+          end do
+        end do
+      end do
+      call diezdecomp_transp_execute_generic_nobuf(dz_tr(1),dz_in,dz_out)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,mz
+            ya(j,k,i) = cmplx(dz_out(j-1+mz*(k-1+2*nyA*(i-1))),dz_out(j-1+mz*(k-1+nyA+2*nyA*(i-1))),rp)
+          end do
+        end do
+      end do
+#endif
+    case default
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do k=1,nyA
+        do j=1,nzA
+          do i=1,nxh
+            p = own_kx(i)
+            sbuf(sd_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1))) = xa(i,j,k)
+          end do
+        end do
+      end do
+      call alltoallv(sbuf,sc_xy,sd_xy,rbuf,rc_xy,rd_xy,comm_row)
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,mz
+            p = own_z(j)
+            ya(j,k,i) = rbuf(rd_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1)))
+          end do
+        end do
+      end do
+    end select
   end subroutine tr_xa2ya
   !
   subroutine tr_ya2xa(ya,xa)
     implicit none
     complex(rp), intent(in ) :: ya(mz,nyA,nkx)
     complex(rp), intent(out) :: xa(nxh,nzA,nyA)
+    integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
-    !$acc host_data use_device(xa,ya,work)
-    istat = cudecompTransposeYToX(ch,gd_a,ya,xa,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
-    !$acc end host_data
-#else
-    integer :: i,j,k,p
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do i=1,nkx
-      do k=1,nyA
-        do j=1,mz
-          p = own_z(j)
-          rbuf(rd_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1))) = ya(j,k,i)
-        end do
-      end do
-    end do
-    call alltoallv(rbuf,rc_xy,rd_xy,sbuf,sc_xy,sd_xy,comm_row)
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do k=1,nyA
-      do j=1,nzA
-        do i=1,nxh
-          p = own_kx(i)
-          xa(i,j,k) = sbuf(sd_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1)))
-        end do
-      end do
-    end do
 #endif
+    select case(tlib)
+#if defined(_USE_CUDECOMP)
+    case(TL_CUDECOMP)
+      !$acc host_data use_device(xa,ya,work)
+      istat = cudecompTransposeYToX(ch,gd_a,ya,xa,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+      !$acc end host_data
+#endif
+#if defined(_USE_DIEZDECOMP)
+    case(TL_DIEZ)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,mz
+            dz_in(j-1+mz*(k-1+2*nyA*(i-1)))     = real(ya(j,k,i),rp)
+            dz_in(j-1+mz*(k-1+nyA+2*nyA*(i-1))) = aimag(ya(j,k,i))
+          end do
+        end do
+      end do
+      call diezdecomp_transp_execute_generic_nobuf(dz_tr(2),dz_in,dz_out)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do k=1,nyA
+        do j=1,nzA
+          do i=1,nxh
+            xa(i,j,k) = cmplx(dz_out(i-1+nxh*(j-1+nzA*(k-1))),dz_out(i-1+nxh*(j-1+nzA*(k-1+nyA))),rp)
+          end do
+        end do
+      end do
+#endif
+    case default
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,mz
+            p = own_z(j)
+            rbuf(rd_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1))) = ya(j,k,i)
+          end do
+        end do
+      end do
+      call alltoallv(rbuf,rc_xy,rd_xy,sbuf,sc_xy,sd_xy,comm_row)
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do k=1,nyA
+        do j=1,nzA
+          do i=1,nxh
+            p = own_kx(i)
+            xa(i,j,k) = sbuf(sd_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1)))
+          end do
+        end do
+      end do
+    end select
   end subroutine tr_ya2xa
   !
   subroutine tr_yb2zb(yb,zb)
     implicit none
     complex(rp), intent(in ) :: yb(nz,nyA,nkx)
     complex(rp), intent(out) :: zb(nkx,nkz,ny)
+    integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
-    !$acc host_data use_device(yb,zb,work)
-    istat = cudecompTransposeYToZ(ch,gd_b,yb,zb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
-    !$acc end host_data
-#else
-    integer :: i,j,k,p
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do i=1,nkx
-      do k=1,nyA
-        do j=1,nz
-          p = own_kz(j)
-          sbuf(sd_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1))) = yb(j,k,i)
-        end do
-      end do
-    end do
-    call alltoallv(sbuf,sc_yz,sd_yz,rbuf,rc_yz,rd_yz,comm_col)
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do k=1,ny
-      do j=1,nkz
-        do i=1,nkx
-          p = own_y(k)
-          zb(i,j,k) = rbuf(rd_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p))))
-        end do
-      end do
-    end do
 #endif
+    select case(tlib)
+#if defined(_USE_CUDECOMP)
+    case(TL_CUDECOMP)
+      !$acc host_data use_device(yb,zb,work)
+      istat = cudecompTransposeYToZ(ch,gd_b,yb,zb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+      !$acc end host_data
+#endif
+#if defined(_USE_DIEZDECOMP)
+    case(TL_DIEZ)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,nz
+            dz_in(j-1+nz*(k-1+nyA*(i-1)))     = real(yb(j,k,i),rp)
+            dz_in(j-1+nz*(k-1+nyA*(i-1+nkx))) = aimag(yb(j,k,i))
+          end do
+        end do
+      end do
+      call diezdecomp_transp_execute_generic_nobuf(dz_tr(3),dz_in,dz_out)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do k=1,ny
+        do j=1,nkz
+          do i=1,nkx
+            zb(i,j,k) = cmplx(dz_out(i-1+2*nkx*(j-1+nkz*(k-1))),dz_out(i-1+nkx+2*nkx*(j-1+nkz*(k-1))),rp)
+          end do
+        end do
+      end do
+#endif
+    case default
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,nz
+            p = own_kz(j)
+            sbuf(sd_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1))) = yb(j,k,i)
+          end do
+        end do
+      end do
+      call alltoallv(sbuf,sc_yz,sd_yz,rbuf,rc_yz,rd_yz,comm_col)
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do k=1,ny
+        do j=1,nkz
+          do i=1,nkx
+            p = own_y(k)
+            zb(i,j,k) = rbuf(rd_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p))))
+          end do
+        end do
+      end do
+    end select
   end subroutine tr_yb2zb
   !
   subroutine tr_zb2yb(zb,yb)
     implicit none
     complex(rp), intent(in ) :: zb(nkx,nkz,ny)
     complex(rp), intent(out) :: yb(nz,nyA,nkx)
+    integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
-    !$acc host_data use_device(yb,zb,work)
-    istat = cudecompTransposeZToY(ch,gd_b,zb,yb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
-    !$acc end host_data
-#else
-    integer :: i,j,k,p
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do k=1,ny
-      do j=1,nkz
-        do i=1,nkx
-          p = own_y(k)
-          rbuf(rd_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p)))) = zb(i,j,k)
-        end do
-      end do
-    end do
-    call alltoallv(rbuf,rc_yz,rd_yz,sbuf,sc_yz,sd_yz,comm_col)
-    !$acc parallel loop collapse(3) default(present) private(p) async(1)
-    do i=1,nkx
-      do k=1,nyA
-        do j=1,nz
-          p = own_kz(j)
-          yb(j,k,i) = sbuf(sd_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1)))
-        end do
-      end do
-    end do
 #endif
+    select case(tlib)
+#if defined(_USE_CUDECOMP)
+    case(TL_CUDECOMP)
+      !$acc host_data use_device(yb,zb,work)
+      istat = cudecompTransposeZToY(ch,gd_b,zb,yb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
+      !$acc end host_data
+#endif
+#if defined(_USE_DIEZDECOMP)
+    case(TL_DIEZ)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do k=1,ny
+        do j=1,nkz
+          do i=1,nkx
+            dz_in(i-1+2*nkx*(j-1+nkz*(k-1)))     = real(zb(i,j,k),rp)
+            dz_in(i-1+nkx+2*nkx*(j-1+nkz*(k-1))) = aimag(zb(i,j,k))
+          end do
+        end do
+      end do
+      call diezdecomp_transp_execute_generic_nobuf(dz_tr(4),dz_in,dz_out)
+      !$acc parallel loop collapse(3) default(present) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,nz
+            yb(j,k,i) = cmplx(dz_out(j-1+nz*(k-1+nyA*(i-1))),dz_out(j-1+nz*(k-1+nyA*(i-1+nkx))),rp)
+          end do
+        end do
+      end do
+#endif
+    case default
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do k=1,ny
+        do j=1,nkz
+          do i=1,nkx
+            p = own_y(k)
+            rbuf(rd_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p)))) = zb(i,j,k)
+          end do
+        end do
+      end do
+      call alltoallv(rbuf,rc_yz,rd_yz,sbuf,sc_yz,sd_yz,comm_col)
+      !$acc parallel loop collapse(3) default(present) private(p) async(1)
+      do i=1,nkx
+        do k=1,nyA
+          do j=1,nz
+            p = own_kz(j)
+            yb(j,k,i) = sbuf(sd_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1)))
+          end do
+        end do
+      end do
+    end select
   end subroutine tr_zb2yb
   !
-#if !defined(_USE_CUDECOMP)
   subroutine alltoallv(sb,sc,sd,rb,rc,rd,comm)
     implicit none
     complex(rp), intent(inout) :: sb(:),rb(:)
@@ -466,5 +657,4 @@ contains
     call MPI_ALLTOALLV(sb,sc,sd,MPI_DOUBLE_COMPLEX,rb,rc,rd,MPI_DOUBLE_COMPLEX,comm,ierr)
     !$acc end host_data
   end subroutine alltoallv
-#endif
 end module mod_decomp

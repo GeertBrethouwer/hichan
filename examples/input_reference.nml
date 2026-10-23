@@ -173,6 +173,8 @@
 &parallel                              ! domain decomposition and GPU communication
 !------------------------------------------------------------------------------------------------------
   pdims                   = 0, 0       ! process grid p1 x p2 (0,0: automatic / cuDecomp autotuning)   [0,0]
+  transpose_lib           = 'auto'     ! transposes: 'cudecomp', 'diezdecomp', 'mpi' (MPI_Alltoallv), ['auto']
+                                       !   or 'auto' (first one built in, in this order); see README
   cudecomp_t_backend      = 0          ! GPU transposes: 0 = autotune, otherwise a cuDecomp backend   [0]
                                        !   (1 MPI_P2P, 2 MPI_P2P_PL, 3 MPI_A2A, 4 NCCL, 5 NCCL_PL,
                                        !    6 NVSHMEM, 7 NVSHMEM_PL, 8 NVSHMEM_SM)

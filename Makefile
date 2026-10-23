@@ -5,6 +5,9 @@
 #   make GPU=1                 GPU build with nvfortran (OpenACC + cuFFT), MPI transposes
 #                              (requires CUDA-aware MPI)
 #   make GPU=1 CUDECOMP=1      GPU build with cuDecomp transposes (recommended)
+#   make ... DIEZDECOMP=1      add the diezDecomp transposes (tools/get_diezdecomp.sh first);
+#                              CPU or GPU, can be combined with CUDECOMP=1. The library is chosen
+#                              at run time with transpose_lib in &parallel
 #
 # Settings for a specific machine can be put in a file and passed with
 #   make CONFIG=configs/arrhenius.mk
@@ -19,6 +22,8 @@ FC := mpif90
 endif
 GPU       ?= 0
 CUDECOMP  ?= 0
+DIEZDECOMP ?= 0
+DIEZDECOMP_DIR ?= $(CURDIR)/dependencies/diezDecomp
 DEBUG     ?= 0
 GPU_CC    ?= cc90
 CUDECOMP_DIR ?= $(CURDIR)/dependencies/cuDecomp/build
@@ -29,6 +34,7 @@ SRCDIR   := src
 BUILDDIR := build
 EXE      := $(BUILDDIR)/hichan
 
+DZOBJS :=
 SRCS := types.f90 param.f90 compact.f90 decomp.f90 timer.f90 fft.f90 ysolve.f90 fields.f90 \
         rk.f90 stats.f90 io.f90 initflow.f90 main.f90
 OBJS := $(addprefix $(BUILDDIR)/,$(SRCS:.f90=.o))
@@ -36,6 +42,11 @@ OBJS := $(addprefix $(BUILDDIR)/,$(SRCS:.f90=.o))
 DEFINES :=
 LIBS    :=
 INCS    :=
+
+ifeq ($(strip $(DIEZDECOMP)),1)
+  DEFINES += -D_USE_DIEZDECOMP
+  DZOBJS  := $(BUILDDIR)/diezdecomp_core.o $(BUILDDIR)/diezdecomp_api_generic.o
+endif
 
 ifeq ($(strip $(GPU)),1)
   # NVIDIA HPC SDK (nvfortran)
@@ -69,8 +80,14 @@ $(BUILDDIR)/ygrid: tools/ygrid.f90 | $(BUILDDIR)
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
 
-$(EXE): $(OBJS)
-	$(FC) $(FFLAGS) $(OBJS) $(LIBS) -o $@
+$(EXE): $(DZOBJS) $(OBJS)
+	$(FC) $(FFLAGS) $(DZOBJS) $(OBJS) $(LIBS) -o $@
+
+# diezDecomp (external, MIT licence): compiled with the same flags
+$(BUILDDIR)/diezdecomp_core.o: $(DIEZDECOMP_DIR)/src/diezdecomp_core.f90 | $(BUILDDIR)
+	$(FC) $(FFLAGS) -c $< -o $@
+$(BUILDDIR)/diezdecomp_api_generic.o: $(DIEZDECOMP_DIR)/src/diezdecomp_api_generic.f90 $(BUILDDIR)/diezdecomp_core.o
+	$(FC) $(FFLAGS) -c $< -o $@
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.f90 | $(BUILDDIR)
 	$(FC) $(FFLAGS) $(DEFINES) $(INCS) -c $< -o $@
@@ -78,7 +95,7 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.f90 | $(BUILDDIR)
 # module dependencies
 $(BUILDDIR)/param.o:    $(BUILDDIR)/types.o
 $(BUILDDIR)/compact.o:  $(BUILDDIR)/param.o
-$(BUILDDIR)/decomp.o:   $(BUILDDIR)/param.o
+$(BUILDDIR)/decomp.o:   $(BUILDDIR)/param.o $(DZOBJS)
 $(BUILDDIR)/timer.o:    $(BUILDDIR)/decomp.o
 $(BUILDDIR)/fft.o:      $(BUILDDIR)/decomp.o $(BUILDDIR)/timer.o
 $(BUILDDIR)/ysolve.o:   $(BUILDDIR)/decomp.o $(BUILDDIR)/compact.o

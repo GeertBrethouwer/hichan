@@ -48,7 +48,7 @@ configs/           machine settings (arrhenius.mk, generic_gpu.mk)
 examples/          input_reference.nml (every input item, commented), ts_wave (paper Sec. 5.1, check.py),
                    scalar_check (exact laminar scalar solutions), rayleigh_benard and vertical_channel
                    (active scalars, check.py), retau180, retau395 (paper Sec. 5.3), arrhenius_job.sh
-tools/             build_cudecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units),
+tools/             build_cudecomp.sh, get_diezdecomp.sh, os_mode.py (Orr–Sommerfeld modes), plot_stats.py (wall units),
                    restart_slices.py (2D slices from a restart file -> .mat), plot_slices.m (MATLAB/Octave),
                    mean_tauw.m (time-averaged tau_w, u_tau, Re_tau from log.dat, MATLAB/Octave),
                    plot_timing.m (time per step and its parts, spikes; with timing = .true.),
@@ -267,6 +267,7 @@ buoyancy force.
 | `'vv'`, 3D with oblique gravity, two active scalars | identical on 1, 3 and 4 ranks and with the OpenACC build |
 | `scal_form = 'skew'`, inviscid scalars (Pr = 1e10) in the coarse turbulent channel (32×65×32, Re_τ ≈ 180, tanh α_s = 3), t = 0–8 | ∫s² constant to 1% (explicit diffusion) and to 0.3% up to t = 30 (θ = 0.5). The advective and divergence forms grow by 10²–10⁵ and blow up. Skew-symmetric with the compact D1 instead of D1m also grows ×1000, which is why the skew form uses D1m |
 | `scal_form = 'skew'`, Pr = 0.71, same flow | wall gradients agree with the advective form to 0.1–0.3% (truncation level on this coarse grid); identical on 1, 3 and 4 ranks and with the OpenACC build |
+| diezDecomp transposes (`transpose_lib = 'diezdecomp'`, CPU build) | bit-identical `log.dat` and `stats.dat` to the MPI transposes on 1–4 ranks, 8 process grids including uneven splits; OpenACC host-fallback build agrees to round-off (divergence) |
 | Restart | 20 steps straight vs. 10 + restart + 10 (restarting on 3 instead of 2 ranks): bit-identical |
 | OpenACC code path | built with `gfortran -fopenacc` (host fallback), with cuFFT emulated by FFTW using the same layout parameters: results identical to the CPU build |
 
@@ -288,6 +289,24 @@ make CONFIG=configs/arrhenius.mk              # -acc -cuda -gpu=cc90, cuFFT, cuD
 
 `make GPU=1` without `CUDECOMP=1` uses the portable MPI_Alltoallv transposes on device buffers. This requires a
 CUDA-aware MPI. Use it as a fallback if cuDecomp is not available.
+
+**Transpose libraries.** Three are available, selected at run time with `transpose_lib` in `&parallel`:
+
+| `transpose_lib` | build | notes |
+|---|---|---|
+| `'cudecomp'` | `CUDECOMP=1` | NVIDIA cuDecomp: autotunes the process grid and the backend (MPI, NCCL, NVSHMEM) |
+| `'diezdecomp'` | `DIEZDECOMP=1`, after `./tools/get_diezdecomp.sh` | [diezDecomp](https://github.com/Rafael10Diez/diezDecomp) (Diez Sanhueza, Peeters & Costa, CPC 316 (2025) 109811): OpenACC packing, autotuned MPI_Isend/Irecv modes, data that stays on a rank is copied without MPI. Portable (NVIDIA, AMD, CPU). Needs CUDA-aware MPI on GPUs. The process grid is `pdims` (no grid autotuning) |
+| `'mpi'` | always | MPI_Alltoallv, needs CUDA-aware MPI on GPUs |
+
+`'auto'` (default) takes cuDecomp if built in, then diezDecomp, then MPI. Several can be built in at once, e.g.
+`make CONFIG=configs/arrhenius.mk DIEZDECOMP=1`, so they can be compared with the same executable (and
+`timing = .true.`).
+
+diezDecomp transposes real arrays. HiCHAN's spectral data are complex, so the real and imaginary parts are stacked
+along the axis that the transpose leaves in place (y for the x↔z-FFT transposes, kx for the z-FFT↔wall-normal
+transposes). Each complex transpose is then one real transpose of the same data volume, plus one extra copy on the
+GPU. The results are bit-identical to the MPI transposes (tested on 1–4 ranks with process grids 1×1, 2×1, 1×2,
+3×1, 1×3, 2×2, 4×1 and 1×4, including uneven splits).
 
 **Launching:** a correct start prints `number of MPI processes: N` with N equal to the number of Slurm tasks,
 and the input namelist only once. If the log says `No PMIx server was reachable ... singletons will be started`,
@@ -328,7 +347,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
-| `&parallel` | `pdims`, `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
+| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
 
 ## Output (in `data_dir`)
 
@@ -390,6 +409,8 @@ round-off (≤ 1e-15).
 * Batched cuFFT plans through the advanced data layout. The Makefile flags and the cuDecomp build follow CaNS.
 * One thread per Fourier column with sequential wall-normal sweeps. This is CaNS' `gaussel_gpu` pattern,
   extended here to banded compact-scheme systems.
+* diezDecomp (from the CaNS developers, used in their LUMI/Leonardo work) is available as an alternative transpose
+  library; see *Transpose libraries* above.
 * CaNS-EIGEN's GEMM-based eigen-projection solvers target second-order FD Poisson problems and were not adopted.
   The compact collocated D1² operator with influence-matrix wall conditions is strongly non-normal, so its
   numerical diagonalisation is less accurate than the O(Ny) banded factorisation of Sec. 4.1, which is cheap on

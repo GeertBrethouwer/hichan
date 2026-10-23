@@ -89,6 +89,7 @@ module mod_param
   ! &parallel
   !
   integer :: pdims(2) = [0,0]              ! process grid (0,0 -> automatic / cuDecomp autotuning)
+  character(len=12) :: transpose_lib = 'auto' ! 'auto', 'cudecomp', 'diezdecomp' or 'mpi'
   integer :: cudecomp_t_backend = 0        ! 0 -> autotune, otherwise CUDECOMP_TRANSPOSE_COMM_* value
   logical :: cudecomp_enable_nccl = .true., cudecomp_enable_nvshmem = .false.
   !
@@ -124,7 +125,7 @@ contains
                       mode_log_kx,mode_log_kz,timing,timing_sync
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit,scal_form
     namelist /buoyancy/ gravity,ri
-    namelist /parallel/ pdims,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
+    namelist /parallel/ pdims,transpose_lib,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
     !
     open(newunit=iunit,file='input.nml',status='old',action='read',iostat=ios)
     if(ios /= 0) call abort_run('cannot open input.nml')

@@ -61,6 +61,19 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
   - After the first run, set `cudecomp_t_backend` to the backend the autotuner reported (e.g. 4 for NCCL) to skip
     the autotuning at start-up.
 
+- **Transpose library** (`transpose_lib`, see the README). With `timing = .true.` the line
+  `transposes (communication)` of the timing report compares cuDecomp, diezDecomp and MPI directly; build with
+  `CUDECOMP=1 DIEZDECOMP=1` to have all three in one executable.
+- **Slab decompositions** (one of `p1`, `p2` equal to 1) halve the communication: one of the two transposes of
+  every FFT becomes a local copy. That copy is done without MPI by cuDecomp and diezDecomp, and through
+  MPI_Alltoallv on a one-rank communicator by `'mpi'`.
+  - `pdims = 1, P` communicates only the z-FFT ↔ wall-normal transposes. These carry the non-dealiased data
+    (nz instead of 3nz/2), so they move ⅓ less data than `pdims = P, 1`. It needs P ≤ min(nz, ny).
+  - `pdims = P, 1` needs P ≤ nx/2.
+  - Diez Sanhueza et al. (CPC 2025) find slabs the fastest choice up to the GPU counts at which they still fit,
+    and 2D grids with few partitions in one direction (e.g. 2 × 512) the best beyond that. Measure on your case:
+    the inter-node links decide.
+
 ## 5. Output and diagnostics
 
 - **Measure first:** `timing = .true.` in `&output` prints where the time goes (FFTs, transposes, solves,
@@ -77,6 +90,16 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 - **`iout_restart`:** every few hours of wall time. Set `wall_time_max` so the final restart is written before
   the job ends.
 - **`mode_log_kx = -1`** unless needed.
+
+## Options from Diez Sanhueza, Peeters & Costa (CPC 316, 2025) and their status in HiCHAN
+
+| idea in the paper | status in HiCHAN |
+|---|---|
+| diezDecomp transposes, with local copies instead of MPI | available: `transpose_lib = 'diezdecomp'` |
+| keep the number of partitions of the wall-normal direction small (p2 here), or use slabs | `pdims`, see section 4 |
+| P-TDMA: distributed wall-normal tridiagonal solves (cyclic reduction plus a reduced system), which remove the transposes to wall-normal pencils | not implemented. In HiCHAN the wall-normal operators are compact (tridiagonal A and banded B up to ±3) with influence-matrix wall conditions, which couple both walls and use dense first and last rows of D1. A distributed version needs a banded (SPIKE/block cyclic reduction) solver and global wall couplings. The paper gains 1.5× per step at 1024 GPUs, but for slab grids, the natural choice at moderate GPU counts, these transposes are already local. Worth it only for very large runs |
+| splitting the implicit solves into a set-up part and a run-time part | already done in this form: the influence matrices and the implicit 6×6/2×2 corrections are cached per wavenumber (and RK substep), and the banded factorisations are rebuilt on the fly from a few shared coefficient rows. Storing per-column factors would increase memory traffic on the GPU |
+| direct x↔z transposes for the implicit 1D diffusion | not applicable: HiCHAN always needs the intermediate z-FFT pencil |
 
 ## Not in the input file
 
