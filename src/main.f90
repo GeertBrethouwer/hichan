@@ -35,6 +35,7 @@ program hichan
   call MPI_COMM_RANK(MPI_COMM_WORLD,myid,ierr)
   call read_input(myid)
   call init_decomp
+  call memory_estimate()
   call init_grid(ny,grid_type,grid_alpha,grid_file)
   call init_compact(ny,fd_order)
   call alloc_fields
@@ -44,6 +45,7 @@ program hichan
   if(ns_method == 'vv') call init_vv
   call init_rk
   call init_stats
+  call memory_report()
   if(myid == 0) then
     call execute_command_line('mkdir -p '//trim(data_dir))
     write(*,'(a)')        ' --------------------------------------------------------------'
@@ -148,6 +150,70 @@ program hichan
   call finalize_decomp
   call MPI_FINALIZE(ierr)
 contains
+  subroutine memory_estimate
+    !
+    ! memory of the large arrays on this rank (GPU memory with OpenACC), printed before they are
+    ! allocated: max over the ranks. Not included: cuFFT work area (shared with an FFT buffer when
+    ! large), CUDA/NCCL/MPI context (~1-2 GB per GPU), small arrays.
+    !
+    integer(i8) :: sp,ph,b(7),bmax(7),gm(2)
+    integer :: ng,ierr
+    character(len=36), parameter :: what(7) = [character(len=36) :: &
+      'spectral fields (u..., N, N_old, s)','physical fields (dealiased grid)','wall-normal solver work arrays', &
+      'implicit / velocity-vorticity extra','FFT buffers','transpose buffers / workspace','total']
+    sp = 16_i8*nkx*nkz*ny
+    ph = 8_i8*mx*nzA*nyA
+    ng = merge(3,1,trim(nl_form) == 'rotational')
+    b(1) = sp*(11+3*max(nscal,1))
+    b(2) = ph*(4+ng)
+    b(3) = sp*5 + 8_i8*36*nkx*nkz
+    b(4) = 0
+    if(visc_theta > 0._rp) b(4) = b(4) + sp*3 + 8_i8*120*nkx*nkz
+    if(ns_method == 'vv')  b(4) = b(4) + sp*4 + 8_i8*28*nkx*nkz
+    b(5) = 16_i8*(max(int(mx/2+1,i8)*nzA*nyA,int(mz,i8)*nyA*nkx) + max(int(nxh,i8)*nzA*nyA,int(nz,i8)*nyA*nkx))
+    b(6) = tr_work_bytes
+    b(7) = sum(b(1:6))
+    call MPI_REDUCE(b,bmax,7,MPI_INTEGER8,MPI_MAX,0,MPI_COMM_WORLD,ierr)
+    if(myid == 0) then
+      write(*,'(a)') ' memory of the large arrays per rank (max over the ranks), GB:'
+      do n=1,7
+        write(*,'(4x,a36,f10.3)') what(n),bmax(n)/1.e9_rp
+      end do
+#if defined(_OPENACC)
+      gm = gpu_mem()
+      write(*,'(4x,a36,f10.3)') 'GPU memory of rank 0 (total)',gm(2)/1.e9_rp
+      if(bmax(7) > 0.95_rp*gm(2)) write(*,'(a)') ' WARNING: the arrays will probably not fit in the '// &
+        'GPU memory; use more GPUs (see PERF.md, memory)'
+#endif
+      flush(6)
+    end if
+  end subroutine memory_estimate
+  !
+  subroutine memory_report
+    ! GPU memory in use after the initialisation (max over the ranks)
+#if defined(_OPENACC)
+    integer(i8) :: m(2),mx_used,mn_free
+    integer :: ierr
+    m = gpu_mem()
+    call MPI_REDUCE(m(2)-m(1),mx_used,1,MPI_INTEGER8,MPI_MAX,0,MPI_COMM_WORLD,ierr)
+    call MPI_REDUCE(m(1),mn_free,1,MPI_INTEGER8,MPI_MIN,0,MPI_COMM_WORLD,ierr)
+    if(myid == 0) write(*,'(a,f8.2,a,f8.2,a)') ' GPU memory after initialisation: max used ',mx_used/1.e9_rp, &
+                                                ' GB, min free ',mn_free/1.e9_rp,' GB'
+#endif
+  end subroutine memory_report
+  !
+#if defined(_OPENACC)
+  function gpu_mem() result(m)
+    ! free and total memory of this rank's GPU, bytes
+    use cudafor, only: cudaMemGetInfo,cuda_count_kind
+    integer(i8) :: m(2)
+    integer(cuda_count_kind) :: fr,tot
+    integer :: istat
+    istat = cudaMemGetInfo(fr,tot)
+    m = [int(fr,i8),int(tot,i8)]
+  end function gpu_mem
+#endif
+  !
   subroutine log_line_stdout
     write(*,'(a,i9,a,es12.5,a,es10.3,a,es12.5,a,es10.3)',advance='no') ' step ',istep,'  t = ',time, &
                                                          '  dt = ',dtcur,'  dpdx = ',dpdx_applied,'  div = ',divm

@@ -45,8 +45,8 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 
 ## 4. Parallel settings (`&parallel`) and the number of GPUs
 
-- **Use fewer GPUs for small cases.** Memory is roughly 300 bytes per grid point plus about 24 bytes per scalar,
-  so even the Re_τ = 395 case (256×193×192, about 3 GB) fits on one 96 GB GH200.
+- **Use fewer GPUs for small cases.** Memory is about 330 bytes per grid point (see *Memory* below), so even the
+  Re_τ = 395 case (256×193×192, about 4 GB) fits on one 96 GB GH200.
   - The wall-normal solves use one GPU thread per Fourier mode pair, (nx/2)·nz in total. With 128×128 modes that
     is only 8192 threads; split over 4 GPUs, each GPU is far from fully used, and the transposes over NVLink add
     cost.
@@ -73,6 +73,35 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
   - Diez Sanhueza et al. (CPC 2025) find slabs the fastest choice up to the GPU counts at which they still fit,
     and 2D grids with few partitions in one direction (e.g. 2 × 512) the best beyond that. Measure on your case:
     the inter-node links decide.
+
+## Memory
+
+At start-up HiCHAN prints the memory of its large arrays per rank (max over the ranks), before allocating them,
+and with OpenACC also the GPU memory actually used after the initialisation. Per Fourier grid point
+(N = nx·ny·nz, 3/2 dealiasing), the memory in bytes is:
+
+| arrays | bytes per point |
+|---|---|
+| spectral fields u, v, w, N, N_old, 2 work arrays (11 × 8 B) | 88 |
+| per scalar: s, N, N_old | 24 |
+| physical fields on the dealiased grid, 7 × 18 B (`rotational`); 5 × 18 B with `nl_form = 'advective'` | 126 (90) |
+| wall-normal solver work arrays | 40 |
+| FFT buffers (shared between stages; also the cuFFT work area) | 30 |
+| transpose buffers (MPI or diezDecomp; cuDecomp similar, printed at start-up) | 24 |
+| implicit viscous terms (`visc_theta > 0`) / `'vv'` | +24 / +32 |
+
+Explicit, rotational form, one scalar: about 330 bytes per point, plus the CUDA/NCCL/MPI context (1–2 GB per GPU).
+Example: 2560 × 385 × 1920 with one scalar: 1.89·10⁹ points × 332 B ≈ 630 GB, i.e. ≈ 79 GB per GPU on 8 GH200s
+(96 GB each).
+
+Up to version 7d129bc the four FFT buffers were separate (50 instead of 30 B per point) and every cuFFT plan
+allocated its own work area (up to ~6 B per point per plan). That made this example ≈ 84 GB of arrays per GPU
+plus cuFFT work areas and context: more than the ≈ 95 GB available.
+
+If a case does not fit:
+- use more GPUs (the memory per GPU falls as 1/number of GPUs);
+- `nl_form = 'advective'` saves 36 B per point, but needs 15 instead of 9 velocity FFTs per RK stage;
+- every extra scalar costs 24 B per point.
 
 ## 5. Output and diagnostics
 

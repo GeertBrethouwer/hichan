@@ -5,6 +5,8 @@
 #   make GPU=1                 GPU build with nvfortran (OpenACC + cuFFT), MPI transposes
 #                              (requires CUDA-aware MPI)
 #   make GPU=1 CUDECOMP=1      GPU build with cuDecomp transposes (recommended)
+#   make ... CUFFT_AUTO_WORK=1 only if the shared cuFFT work area causes problems: every cuFFT
+#                              plan then allocates its own work area (more GPU memory)
 #   make ... DIEZDECOMP=1      add the diezDecomp transposes (tools/get_diezdecomp.sh first);
 #                              CPU or GPU, can be combined with CUDECOMP=1. The library is chosen
 #                              at run time with transpose_lib in &parallel
@@ -43,6 +45,9 @@ DEFINES :=
 LIBS    :=
 INCS    :=
 
+ifeq ($(strip $(CUFFT_AUTO_WORK)),1)
+  DEFINES += -D_CUFFT_AUTO_WORK
+endif
 ifeq ($(strip $(DIEZDECOMP)),1)
   DEFINES += -D_USE_DIEZDECOMP
   DZOBJS  := $(BUILDDIR)/diezdecomp_core.o $(BUILDDIR)/diezdecomp_api_generic.o
@@ -103,7 +108,7 @@ $(BUILDDIR)/fields.o:   $(BUILDDIR)/decomp.o
 $(BUILDDIR)/rk.o:       $(BUILDDIR)/fields.o $(BUILDDIR)/fft.o $(BUILDDIR)/ysolve.o $(BUILDDIR)/timer.o
 $(BUILDDIR)/stats.o:    $(BUILDDIR)/ysolve.o
 $(BUILDDIR)/io.o:       $(BUILDDIR)/decomp.o
-$(BUILDDIR)/initflow.o: $(BUILDDIR)/ysolve.o
+$(BUILDDIR)/initflow.o: $(BUILDDIR)/ysolve.o $(BUILDDIR)/fields.o
 $(BUILDDIR)/main.o:     $(BUILDDIR)/timer.o $(BUILDDIR)/rk.o $(BUILDDIR)/stats.o $(BUILDDIR)/io.o $(BUILDDIR)/initflow.o
 
 clean:

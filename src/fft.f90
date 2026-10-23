@@ -23,8 +23,14 @@ module mod_fft
   include 'fftw3.f03'
 #endif
   private
-  public :: init_fft,fwd_fft,bwd_fft,end_fft
-  complex(rp), allocatable :: cxw(:,:,:),xaw(:,:,:),yaw(:,:,:),ybw(:,:,:)
+  public :: init_fft,fwd_fft,bwd_fft,end_fft,fft_buffer_bytes
+  !
+  ! work buffers, shared by stages that are never active at the same time:
+  !   bufp: cxw(mx/2+1,nzA,nyA) (x-FFT, spectral side)  and  yaw(mz,nyA,nkx) (z-FFT)
+  !   bufa: xaw(nxh,nzA,nyA)    (x-pencil, grid A)       and  ybw(nz,nyA,nkx) (y-pencil, grid B)
+  ! On GPUs bufa is also the work area of all cuFFT plans: it is idle during every cuFFT call.
+  !
+  complex(rp), allocatable :: bufp(:),bufa(:)
 #if defined(_OPENACC)
   integer :: plan_xf,plan_xb,plan_z
 #else
@@ -35,30 +41,74 @@ contains
   subroutine init_fft(phys)
     implicit none
     real(rp), intent(inout) :: phys(mx,nzA,nyA) ! only used for planning (not modified)
+    integer(i8) :: np_,na_
+#if defined(_OPENACC)
     integer :: istat
-    allocate(cxw(mx/2+1,nzA,nyA),xaw(nxh,nzA,nyA),yaw(mz,nyA,nkx),ybw(nz,nyA,nkx))
-    !$acc enter data create(cxw,xaw,yaw,ybw)
+    integer(i8) :: ws(3)
+#endif
+    np_ = max(int(mx/2+1,i8)*nzA*nyA,int(mz,i8)*nyA*nkx)
+    na_ = max(int(nxh,i8)*nzA*nyA,int(nz,i8)*nyA*nkx)
     norm = 1._rp/(real(mx,rp)*real(mz,rp))
 #if defined(_OPENACC)
+#if defined(_CUFFT_AUTO_WORK)
+    ws(:) = 0
     istat = cufftPlanMany(plan_xf,1,[mx],[mx],1,mx,[mx/2+1],1,mx/2+1,CUFFT_D2Z,nzA*nyA)
     if(istat /= CUFFT_SUCCESS) call abort_run('cuFFT plan (x, forward)')
     istat = cufftPlanMany(plan_xb,1,[mx],[mx/2+1],1,mx/2+1,[mx],1,mx,CUFFT_Z2D,nzA*nyA)
     if(istat /= CUFFT_SUCCESS) call abort_run('cuFFT plan (x, backward)')
     istat = cufftPlanMany(plan_z ,1,[mz],[mz],1,mz,[mz],1,mz,CUFFT_Z2Z,nyA*nkx)
     if(istat /= CUFFT_SUCCESS) call abort_run('cuFFT plan (z)')
+#else
+    ! plans without their own work areas (as in CaNS); one shared area is set below
+    istat = cufftCreate(plan_xf); istat = cufftSetAutoAllocation(plan_xf,0)
+    istat = cufftMakePlanMany(plan_xf,1,[mx],[mx],1,mx,[mx/2+1],1,mx/2+1,CUFFT_D2Z,nzA*nyA,ws(1))
+    if(istat /= CUFFT_SUCCESS) call abort_run('cuFFT plan (x, forward)')
+    istat = cufftCreate(plan_xb); istat = cufftSetAutoAllocation(plan_xb,0)
+    istat = cufftMakePlanMany(plan_xb,1,[mx],[mx/2+1],1,mx/2+1,[mx],1,mx,CUFFT_Z2D,nzA*nyA,ws(2))
+    if(istat /= CUFFT_SUCCESS) call abort_run('cuFFT plan (x, backward)')
+    istat = cufftCreate(plan_z ); istat = cufftSetAutoAllocation(plan_z ,0)
+    istat = cufftMakePlanMany(plan_z ,1,[mz],[mz],1,mz,[mz],1,mz,CUFFT_Z2Z,nyA*nkx,ws(3))
+    if(istat /= CUFFT_SUCCESS) call abort_run('cuFFT plan (z)')
+    na_ = max(na_,(maxval(ws)+15)/16)
+#endif
+#endif
+    allocate(bufp(np_),bufa(na_))
+    !$acc enter data create(bufp,bufa)
+#if defined(_OPENACC)
+#if !defined(_CUFFT_AUTO_WORK)
+    !$acc host_data use_device(bufa)
+    istat = cufftSetWorkArea(plan_xf,bufa)
+    istat = istat + cufftSetWorkArea(plan_xb,bufa)
+    istat = istat + cufftSetWorkArea(plan_z ,bufa)
+    !$acc end host_data
+    if(istat /= CUFFT_SUCCESS) call abort_run('cufftSetWorkArea failed')
+#endif
     istat = cufftSetStream(plan_xf,istream)
     istat = cufftSetStream(plan_xb,istream)
     istat = cufftSetStream(plan_z ,istream)
 #else
-    istat = 0
+    call plan_cpu(phys,bufp,bufp)
+#endif
+  end subroutine init_fft
+  !
+#if !defined(_OPENACC)
+  subroutine plan_cpu(phys,cxw,yaw)
+    implicit none
+    real(rp), intent(inout) :: phys(mx,nzA,nyA)
+    complex(rp), intent(inout) :: cxw(mx/2+1,nzA,nyA),yaw(mz,nyA,nkx)
     plan_xf = fftw_plan_many_dft_r2c(1,[mx],nzA*nyA,phys,[mx],1,mx,cxw,[mx/2+1],1,mx/2+1,FFTW_ESTIMATE)
     plan_xb = fftw_plan_many_dft_c2r(1,[mx],nzA*nyA,cxw,[mx/2+1],1,mx/2+1,phys,[mx],1,mx,FFTW_ESTIMATE)
     plan_zf = fftw_plan_many_dft(1,[mz],nyA*nkx,yaw,[mz],1,mz,yaw,[mz],1,mz,FFTW_FORWARD ,FFTW_ESTIMATE)
     plan_zb = fftw_plan_many_dft(1,[mz],nyA*nkx,yaw,[mz],1,mz,yaw,[mz],1,mz,FFTW_BACKWARD,FFTW_ESTIMATE)
     if(.not.(c_associated(plan_xf).and.c_associated(plan_xb).and.c_associated(plan_zf).and.c_associated(plan_zb))) &
       call abort_run('FFTW planning failed')
+  end subroutine plan_cpu
 #endif
-  end subroutine init_fft
+  !
+  integer(i8) function fft_buffer_bytes()
+    implicit none
+    fft_buffer_bytes = 16_i8*(size(bufp,kind=i8)+size(bufa,kind=i8))
+  end function fft_buffer_bytes
   !
   subroutine end_fft
     implicit none
@@ -69,7 +119,7 @@ contains
     call fftw_destroy_plan(plan_xf); call fftw_destroy_plan(plan_xb)
     call fftw_destroy_plan(plan_zf); call fftw_destroy_plan(plan_zb)
 #endif
-    !$acc exit data delete(cxw,xaw,yaw,ybw)
+    !$acc exit data delete(bufp,bufa)
   end subroutine end_fft
   !
   subroutine fwd_fft(phys,fh)
@@ -79,12 +129,37 @@ contains
     implicit none
     real(rp)   , intent(inout) :: phys(mx,nzA,nyA)
     complex(rp), intent(out)   :: fh(nkx,nkz,ny)
-    integer :: i,j,k,nzh,off
+    call tic(tm_fft)
+    call fwd_x(phys,bufp,bufa)                                    ! phys -> cxw -> xaw
+    call tic(tm_tr); call tr_xa2ya(bufa,bufp); call toc(tm_tr)   ! xaw -> yaw
+    call fwd_z(bufp,bufa)                                         ! yaw -> ybw
+    call tic(tm_tr); call tr_yb2zb(bufa,fh); call toc(tm_tr)     ! ybw -> fh
+    call toc(tm_fft)
+  end subroutine fwd_fft
+  !
+  subroutine bwd_fft(fh,phys)
+    !
+    ! spectral (z-pencil) -> physical (x-pencil), with zero padding
+    !
+    implicit none
+    complex(rp), intent(in)  :: fh(nkx,nkz,ny)
+    real(rp)   , intent(out) :: phys(mx,nzA,nyA)
+    call tic(tm_fft)
+    call tic(tm_tr); call tr_zb2yb(fh,bufa); call toc(tm_tr)     ! fh -> ybw
+    call bwd_z(bufa,bufp)                                         ! ybw -> yaw
+    call tic(tm_tr); call tr_ya2xa(bufp,bufa); call toc(tm_tr)   ! yaw -> xaw
+    call bwd_x(bufa,bufp,phys)                                    ! xaw -> cxw -> phys
+    call toc(tm_fft)
+  end subroutine bwd_fft
+  !
+  subroutine fwd_x(phys,cxw,xaw)
+    implicit none
+    real(rp)   , intent(inout) :: phys(mx,nzA,nyA)
+    complex(rp), intent(inout) :: cxw(mx/2+1,nzA,nyA)
+    complex(rp), intent(out)   :: xaw(nxh,nzA,nyA)
+    integer :: i,j,k
 #if defined(_OPENACC)
     integer :: istat
-#endif
-    call tic(tm_fft)
-#if defined(_OPENACC)
     !$acc host_data use_device(phys,cxw)
     istat = cufftExecD2Z(plan_xf,phys,cxw)
     !$acc end host_data
@@ -99,8 +174,15 @@ contains
         end do
       end do
     end do
-    call tic(tm_tr); call tr_xa2ya(xaw,yaw); call toc(tm_tr)
+  end subroutine fwd_x
+  !
+  subroutine fwd_z(yaw,ybw)
+    implicit none
+    complex(rp), intent(inout) :: yaw(mz,nyA,nkx)
+    complex(rp), intent(out)   :: ybw(nz,nyA,nkx)
+    integer :: i,j,k,nzh,off
 #if defined(_OPENACC)
+    integer :: istat
     !$acc host_data use_device(yaw)
     istat = cufftExecZ2Z(plan_z,yaw,yaw,CUFFT_FORWARD)
     !$acc end host_data
@@ -123,23 +205,16 @@ contains
         end do
       end do
     end do
-    call tic(tm_tr); call tr_yb2zb(ybw,fh); call toc(tm_tr)
-    call toc(tm_fft)
-  end subroutine fwd_fft
+  end subroutine fwd_z
   !
-  subroutine bwd_fft(fh,phys)
-    !
-    ! spectral (z-pencil) -> physical (x-pencil), with zero padding
-    !
+  subroutine bwd_z(ybw,yaw)
     implicit none
-    complex(rp), intent(in)  :: fh(nkx,nkz,ny)
-    real(rp)   , intent(out) :: phys(mx,nzA,nyA)
+    complex(rp), intent(in)  :: ybw(nz,nyA,nkx)
+    complex(rp), intent(out) :: yaw(mz,nyA,nkx)
     integer :: i,j,k,nzh,off
 #if defined(_OPENACC)
     integer :: istat
 #endif
-    call tic(tm_fft)
-    call tic(tm_tr); call tr_zb2yb(fh,ybw); call toc(tm_tr)
     nzh = nz/2
     off = mz-nz
     !$acc parallel loop collapse(3) default(present) async(1)
@@ -163,7 +238,17 @@ contains
 #else
     call fftw_execute_dft(plan_zb,yaw,yaw)
 #endif
-    call tic(tm_tr); call tr_ya2xa(yaw,xaw); call toc(tm_tr)
+  end subroutine bwd_z
+  !
+  subroutine bwd_x(xaw,cxw,phys)
+    implicit none
+    complex(rp), intent(in)    :: xaw(nxh,nzA,nyA)
+    complex(rp), intent(inout) :: cxw(mx/2+1,nzA,nyA)
+    real(rp)   , intent(out)   :: phys(mx,nzA,nyA)
+    integer :: i,j,k
+#if defined(_OPENACC)
+    integer :: istat
+#endif
     !$acc parallel loop collapse(3) default(present) async(1)
     do k=1,nyA
       do j=1,nzA
@@ -183,6 +268,5 @@ contains
 #else
     call fftw_execute_dft_c2r(plan_xb,cxw,phys)
 #endif
-    call toc(tm_fft)
-  end subroutine bwd_fft
+  end subroutine bwd_x
 end module mod_fft

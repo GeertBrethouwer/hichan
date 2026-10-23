@@ -6,6 +6,7 @@ module mod_initflow
   use mod_param
   use mod_decomp , only: myid,nkx,nkz,kx_lo,kz_lo
   use mod_compact, only: yg
+  use mod_fields , only: un => nu,vn => nv,wn => nw
   implicit none
   private
   public :: init_fields
@@ -141,7 +142,7 @@ contains
     integer :: i,j,k,n,ig,jg,mxx,mzz,iunit,ios,mmax_x,mmax_z
     real(rp) :: y,amp,ulam,e,fac,uref
     real(rp) :: ur,ui,vr,vi,wr,wi
-    complex(rp), allocatable :: mode(:,:),un(:,:,:),vn(:,:,:),wn(:,:,:)
+    complex(rp), allocatable :: mode(:,:)
     u(:,:,:) = 0; v(:,:,:) = 0; w(:,:,:) = 0; s(:,:,:,:) = 0
     !
     ! laminar profile in the mean mode
@@ -201,12 +202,14 @@ contains
       !
       uref = (2._rp/3._rp)*abs(ulam)
       if(uref == 0._rp) uref = 1._rp
-      allocate(un(nkx,nkz,ny),vn(nkx,nkz,ny),wn(nkx,nkz,ny))
+      ! the noise is built in nu, nv, nw (not yet used; no extra GPU memory), then they are reset
       call disturbance(un,vn,wn,'noise')
       call project_scale(un,vn,wn,init_noise*uref)
       call disturbance(u,v,w,'large')
       call project_scale(u,v,w,init_amp*uref)
       u(:,:,:) = u(:,:,:) + un(:,:,:); v(:,:,:) = v(:,:,:) + vn(:,:,:); w(:,:,:) = w(:,:,:) + wn(:,:,:)
+      un(:,:,:) = 0; vn(:,:,:) = 0; wn(:,:,:) = 0
+      !$acc update device(un,vn,wn)
       if(kx_lo == 1 .and. kz_lo == 1) then
         do k=1,ny
           u(1,1,k) = ulam*(1._rp-yg(k)**2)

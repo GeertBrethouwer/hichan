@@ -351,6 +351,8 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 
 ## Output (in `data_dir`)
 
+* At start-up (stdout): the memory of the large arrays per rank, and with OpenACC the GPU memory in use after
+  the initialisation. Memory requirements are explained in PERF.md (*Memory*).
 * `log.dat`: step, t, Δt, bulk velocity, applied −dp/dx, τ_w, Re_τ, max |div u|, fluctuation energy, energy of
   one Fourier mode (`mode_log_kx, mode_log_kz`), and the wall gradients of each scalar.
   Time average of τ_w from a given time on (MATLAB/Octave):

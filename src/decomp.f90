@@ -44,6 +44,7 @@ module mod_decomp
   public :: init_decomp,finalize_decomp,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb
   integer, public :: myid,nproc,p1,p2,cx1,cx2
   integer, public :: zA_lo,nzA,yA_lo,nyA,kx_lo,nkx,kz_lo,nkz
+  integer(i8), public :: tr_work_bytes = 0      ! memory of the transpose buffers / workspace (this rank)
   integer, parameter :: TL_MPI = 1, TL_CUDECOMP = 2, TL_DIEZ = 3
   integer :: tlib = TL_MPI
 #if defined(_OPENACC)
@@ -284,6 +285,7 @@ contains
     end do
     i = max(nxh*nzA*nyA,mz*nyA*nkx,nz*nyA*nkx,nkx*nkz*ny)
     allocate(sbuf(i),rbuf(i))
+    tr_work_bytes = 32_i8*i
     !$acc enter data copyin(kxlo_r,nkx_r,zlo_r,nz_r,kzlo_c,nkz_c,ylo_c,ny_c, &
     !$acc                   own_kx,own_z,own_kz,own_y,sd_xy,rd_xy,sd_yz,rd_yz) create(sbuf,rbuf)
   end subroutine init_mpi_transposes
@@ -315,6 +317,7 @@ contains
     ! the 'nobuf' execution uses p_out to pack the input and p_in to receive: both need max size
     n = max(product(sxa),product(sya),product(syb),product(szb))
     allocate(dz_in(0:n-1),dz_out(0:n-1))
+    tr_work_bytes = 16_i8*n
     dz_in(:) = 0._rp; dz_out(:) = 0._rp
     !$acc enter data copyin(dz_in,dz_out)
   end subroutine init_diezdecomp
@@ -390,6 +393,7 @@ contains
     istat = cudecompGetTransposeWorkspaceSize(ch,gd_b,wsb)
     wsize = max(wsa,wsb)
     allocate(work(wsize))
+    tr_work_bytes = 16_i8*wsize
     istat = cudecompMalloc(ch,gd_a,work_d,wsize)
     call acc_map_data(work,work_d,wsize*16_i8)
   end subroutine init_cudecomp
