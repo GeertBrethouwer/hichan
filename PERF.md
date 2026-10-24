@@ -64,6 +64,10 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 - **Transpose library** (`transpose_lib`, see the README). With `timing = .true.` the line
   `transposes (communication)` of the timing report compares cuDecomp, diezDecomp and MPI directly; build with
   `CUDECOMP=1 DIEZDECOMP=1` to have all three in one executable.
+- **`transpose_prec = 'single'`** halves the data sent in every transpose; on several nodes the transposes take
+  most of the time per step, so this can be the largest single gain. Accuracy: see the README. On one CPU node
+  (where the transposes are mostly local memory copies) the gain was only 8%; on GPUs connected by the network,
+  measure it with `timing = .true.`.
 - **Slab decompositions** (one of `p1`, `p2` equal to 1) halve the communication: one of the two transposes of
   every FFT becomes a local copy. That copy is done without MPI by cuDecomp and diezDecomp, and through
   MPI_Alltoallv on a one-rank communicator by `'mpi'`.
@@ -87,7 +91,7 @@ and with OpenACC also the GPU memory actually used after the initialisation. Per
 | physical fields on the dealiased grid, 7 × 18 B (`rotational`); 5 × 18 B with `nl_form = 'advective'` | 126 (90) |
 | wall-normal solver work arrays | 40 |
 | FFT buffers (shared between stages; also the cuFFT work area) | 30 |
-| transpose buffers (MPI or diezDecomp; cuDecomp similar, printed at start-up) | 24 |
+| transpose buffers (MPI or diezDecomp; cuDecomp similar, printed at start-up) | 24 (12 with `transpose_prec = 'single'`; cuDecomp single: about the same as double, because of staging arrays) |
 | implicit viscous terms (`visc_theta > 0`) / `'vv'` | +24 / +32 |
 
 Explicit, rotational form, one scalar: about 330 bytes per point, plus the CUDA/NCCL/MPI context (1–2 GB per GPU).

@@ -175,6 +175,9 @@
   pdims                   = 0, 0       ! process grid p1 x p2 (0,0: automatic / cuDecomp autotuning)   [0,0]
   transpose_lib           = 'auto'     ! transposes: 'cudecomp', 'diezdecomp', 'mpi' (MPI_Alltoallv), ['auto']
                                        !   or 'auto' (first one built in, in this order); see README
+  transpose_prec          = 'double'   ! precision of the data sent in the transposes: 'double' or   ['double']
+                                       !   'single' (half the communication; computation stays double;
+                                       !   not for kx = 0 perturbations below ~1e-6 of the mean, see README)
   cudecomp_t_backend      = 0          ! GPU transposes: 0 = autotune, otherwise a cuDecomp backend   [0]
                                        !   (1 MPI_P2P, 2 MPI_P2P_PL, 3 MPI_A2A, 4 NCCL, 5 NCCL_PL,
                                        !    6 NVSHMEM, 7 NVSHMEM_PL, 8 NVSHMEM_SM)

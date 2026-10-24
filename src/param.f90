@@ -90,6 +90,8 @@ module mod_param
   !
   integer :: pdims(2) = [0,0]              ! process grid (0,0 -> automatic / cuDecomp autotuning)
   character(len=12) :: transpose_lib = 'auto' ! 'auto', 'cudecomp', 'diezdecomp' or 'mpi'
+  character(len=8)  :: transpose_prec = 'double' ! data sent in the transposes: 'double' or 'single'
+                                                 ! (rounded to single precision; computation stays double)
   integer :: cudecomp_t_backend = 0        ! 0 -> autotune, otherwise CUDECOMP_TRANSPOSE_COMM_* value
   logical :: cudecomp_enable_nccl = .true., cudecomp_enable_nvshmem = .false.
   !
@@ -125,7 +127,7 @@ contains
                       mode_log_kx,mode_log_kz,timing,timing_sync
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit,scal_form
     namelist /buoyancy/ gravity,ri
-    namelist /parallel/ pdims,transpose_lib,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
+    namelist /parallel/ pdims,transpose_lib,transpose_prec,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
     !
     open(newunit=iunit,file='input.nml',status='old',action='read',iostat=ios)
     if(ios /= 0) call abort_run('cannot open input.nml')
@@ -159,6 +161,7 @@ contains
     if(nscal < 0 .or. nscal > nscal_max) call abort_run('0 <= nscal <= 16 required')
     if(all(forcing /= ['cfr','cpg'])) call abort_run('forcing must be cfr or cpg')
     if(all(nl_form /= ['advective ','rotational'])) call abort_run('nl_form must be advective or rotational')
+    if(all(transpose_prec /= ['double','single'])) call abort_run("transpose_prec must be 'double' or 'single'")
     if(all(scal_form /= ['advective ','divergence','skew      '])) &
       call abort_run("scal_form must be 'advective', 'divergence' or 'skew'")
     nxh = nx/2

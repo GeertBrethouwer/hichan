@@ -268,6 +268,7 @@ buoyancy force.
 | `scal_form = 'skew'`, inviscid scalars (Pr = 1e10) in the coarse turbulent channel (32×65×32, Re_τ ≈ 180, tanh α_s = 3), t = 0–8 | ∫s² constant to 1% (explicit diffusion) and to 0.3% up to t = 30 (θ = 0.5). The advective and divergence forms grow by 10²–10⁵ and blow up. Skew-symmetric with the compact D1 instead of D1m also grows ×1000, which is why the skew form uses D1m |
 | `scal_form = 'skew'`, Pr = 0.71, same flow | wall gradients agree with the advective form to 0.1–0.3% (truncation level on this coarse grid); identical on 1, 3 and 4 ranks and with the OpenACC build |
 | diezDecomp transposes (`transpose_lib = 'diezdecomp'`, CPU build) | bit-identical `log.dat` and `stats.dat` to the MPI transposes on 1–4 ranks, 8 process grids including uneven splits; OpenACC host-fallback build agrees to round-off (divergence) |
+| Single-precision transposes (`transpose_prec = 'single'`, MPI and diezDecomp, CPU and OpenACC builds) | identical on 1, 3 and 4 ranks (rounding is decomposition independent); MPI and diezDecomp bit-identical. TS wave (amplitude 1e-6): decay rate as with double to 5e-8 (relative). Turbulent channel 32×65×32 restarted from a developed field, t = 0–40: the trajectories separate slowly (relative difference of the kinetic energy 1e-7 at t = 18, 2e-5 at t = 40, chaotic growth). Statistics over t = 10–40 agree to all printed digits: Re_τ 201.87, U_c⁺ 16.057, u_rms⁺ 2.635, −uv⁺ 0.788. Divergence still ~1e-14 |
 | Restart | 20 steps straight vs. 10 + restart + 10 (restarting on 3 instead of 2 ranks): bit-identical |
 | OpenACC code path | built with `gfortran -fopenacc` (host fallback), with cuFFT emulated by FFTW using the same layout parameters: results identical to the CPU build |
 
@@ -301,6 +302,18 @@ CUDA-aware MPI. Use it as a fallback if cuDecomp is not available.
 `'auto'` (default) takes cuDecomp if built in, then diezDecomp, then MPI. Several can be built in at once, e.g.
 `make CONFIG=configs/arrhenius.mk DIEZDECOMP=1`, so they can be compared with the same executable (and
 `timing = .true.`).
+
+**Single-precision transposes** (`transpose_prec = 'single'`, all three libraries): the data are rounded to single
+precision only while they are moved between ranks. This halves the communication volume, which dominates the
+time per step on several nodes. All arrays and all computations stay in double precision. The pressure solve and
+the projection act on the double-precision state, so continuity still holds to round-off.
+
+The rounding acts on each streamwise Fourier coefficient separately: the x-transform is done in double precision
+before the data move. Small streamwise modes therefore keep their own relative precision: a TS wave of amplitude
+1e-6 decays at the same rate as with double precision, to 5e-8. The exception is the streamwise-mean column
+(kx = 0), where the mean profile U(y) and the spanwise modes are rounded together. Perturbations with kx = 0 that
+are weaker than about 1e-6·U (e.g. initial streaks in receptivity or transient-growth studies) are then
+contaminated, so use `'double'` for such cases. 3D field output (`iout_field`) also goes through the transposes.
 
 diezDecomp transposes real arrays. HiCHAN's spectral data are complex, so the real and imaginary parts are stacked
 along the axis that the transpose leaves in place (y for the x↔z-FFT transposes, kx for the z-FFT↔wall-normal
@@ -347,7 +360,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
-| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
+| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
 
 ## Output (in `data_dir`)
 
