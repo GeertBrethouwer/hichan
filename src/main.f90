@@ -163,7 +163,9 @@ contains
       'implicit / velocity-vorticity extra','FFT buffers','transpose buffers / workspace','total']
     sp = 16_i8*nkx*nkz*ny
     ph = 8_i8*mx*nzA*nyA
-    ng = merge(3,1,trim(nl_form) == 'rotational')
+    ng = 1
+    if(nscal > 0 .and. trim(scal_form) /= 'advective') ng = 2
+    if(trim(nl_form) == 'rotational') ng = 3
     b(1) = sp*(11+3*max(nscal,1))
     b(2) = ph*(4+ng)
     b(3) = sp*5 + 8_i8*36*nkx*nkz

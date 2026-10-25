@@ -3,7 +3,7 @@
 !
 module mod_fields
   use mod_types
-  use mod_param , only: ny,mx,nscal,nl_form
+  use mod_param , only: ny,mx,nscal,nl_form,scal_form
   use mod_decomp, only: nkx,nkz,nzA,nyA
   implicit none
   public
@@ -22,7 +22,9 @@ contains
     allocate(nuo(nkx,nkz,ny),nvo(nkx,nkz,ny),nwo(nkx,nkz,ny))
     allocate(tmp1(nkx,nkz,ny),tmp2(nkx,nkz,ny))
     allocate(s(nkx,nkz,ny,max(nscal,1)),ns(nkx,nkz,ny,max(nscal,1)),nso(nkx,nkz,ny,max(nscal,1)))
+    ! work arrays gp: u x omega needs 3; the divergence and skew scalar forms need 2 (add_flux_div)
     ng = 1
+    if(nscal > 0 .and. trim(scal_form) /= 'advective') ng = 2
     if(trim(nl_form) == 'rotational') ng = 3
     allocate(up(mx,nzA,nyA),vp(mx,nzA,nyA),wp(mx,nzA,nyA),ap(mx,nzA,nyA),gp(mx,nzA,nyA,ng))
     u = 0; v = 0; w = 0; nu = 0; nv = 0; nw = 0; nuo = 0; nvo = 0; nwo = 0; tmp1 = 0; tmp2 = 0
