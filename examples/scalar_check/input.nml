@@ -4,7 +4,7 @@
 !    S3, S4 : dS/dy = 0.5 at y = -1, S = 0 at y = 1  ->  S = 0.5 (y - 1)
 !    S5     : dS/dy = 0.2 at both walls              ->  S = 0.2 y
 !  S1, S3 Crank-Nicolson, S2, S4 explicit RK3, S5 backward Euler (theta = 1).
-!  data/log.dat, last 10 columns (wall gradients): -5,5 | -5,5 | 0.5,0.5 | 0.5,0.5 | 0.2,0.2
+!  data/log.dat, last 10 columns (wall gradients): 5,-5 | 5,-5 | 0.5,0.5 | 0.5,0.5 | 0.2,0.2
 !======================================================================================================
 &grid
   nx = 4, nz = 4, ny = 33, lx = 6.283185307179586, lz = 3.141592653589793

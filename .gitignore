@@ -3,3 +3,4 @@ dependencies/
 data/
 *.o
 *.mod
+tests_*/
