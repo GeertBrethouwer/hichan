@@ -26,10 +26,16 @@
 ! transpose_prec = 'single': the data are rounded to single precision for the transposes only
 ! (half the communication volume); all arrays and all computations stay in double precision.
 !
+! Batched and overlapped transposes ('mpi' only; tr_batch, tr_overlap in &parallel, used by
+! bwd_fft_n/fwd_fft_n in mod_fft): the fields of a group are sent in one MPI_Ialltoallv, the block of
+! field f to peer p at nb*displ(p) + (f-1)*count(p) (nb fields in the group). With tr_overlap two
+! buffer slots per transpose stage let the communication of one group run while the previous group
+! is transformed.
+!
 module mod_decomp
   use mpi
   use mod_types
-  use mod_param, only: nxh,mx,mz,nz,ny,pdims,abort_run,transpose_lib,transpose_prec, &
+  use mod_param, only: nxh,mx,mz,nz,ny,pdims,abort_run,transpose_lib,transpose_prec,tr_batch,tr_overlap, &
                        cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
 #if defined(_OPENACC)
   use openacc
@@ -45,12 +51,15 @@ module mod_decomp
   implicit none
   private
   public :: init_decomp,finalize_decomp,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb
+  public :: trb_xa,trb_ya,trb_yb,trb_zb,trb_post,trb_wait,trb_test
   integer, public :: myid,nproc,p1,p2,cx1,cx2
   integer, public :: zA_lo,nzA,yA_lo,nyA,kx_lo,nkx,kz_lo,nkz
   integer(i8), public :: tr_work_bytes = 0      ! memory of the transpose buffers / workspace (this rank)
   integer, parameter :: TL_MPI = 1, TL_CUDECOMP = 2, TL_DIEZ = 3
   integer :: tlib = TL_MPI
   logical, public :: tr_single = .false.        ! transposes in single precision
+  logical, public :: trb_mpi = .false.          ! batched/overlapped MPI transposes set up
+  integer, public :: trb_nslot = 1              ! buffer slots per stage (2 with tr_overlap)
 #if defined(_OPENACC)
   integer(acc_handle_kind), public :: istream
 #endif
@@ -71,6 +80,12 @@ module mod_decomp
   integer, allocatable :: sc_yz(:),sd_yz(:),rc_yz(:),rd_yz(:)
   complex(rp), allocatable :: sbuf(:),rbuf(:)
   complex(sp), allocatable :: sbuf4(:),rbuf4(:)
+  ! batched transposes: send/receive buffers per slot, for grid A (x <-> y, comm_row) and grid B
+  ! (y <-> z, comm_col), with the counts and displacements of the message in flight in each slot
+  complex(rp), allocatable :: tbA_s(:,:),tbA_r(:,:),tbB_s(:,:),tbB_r(:,:)
+  complex(sp), allocatable :: tbA_s4(:,:),tbA_r4(:,:),tbB_s4(:,:),tbB_r4(:,:)
+  integer, allocatable :: csA(:,:),dsA(:,:),crA(:,:),drA(:,:),csB(:,:),dsB(:,:),crB(:,:),drB(:,:)
+  integer :: reqA(2),reqB(2)
 #if defined(_USE_DIEZDECOMP)
   ! diezDecomp works on real arrays: real and imaginary parts are stacked along the axis that a
   ! transpose does not redistribute (y for grid A, kx for grid B), so each complex transpose is one
@@ -133,6 +148,7 @@ contains
     else
       call init_mpi_layout
       if(tlib == TL_MPI) call init_mpi_transposes
+      if(tlib == TL_MPI .and. (tr_batch > 1 .or. tr_overlap)) call init_batched_transposes
 #if defined(_USE_DIEZDECOMP)
       if(tlib == TL_DIEZ) call init_diezdecomp
 #endif
@@ -141,6 +157,13 @@ contains
       write(*,'(a,a)') ' transposes: ',trim(merge('cuDecomp  ',merge('diezDecomp','MPI       ',tlib == TL_DIEZ), &
                                                  tlib == TL_CUDECOMP))//', '//trim(transpose_prec)//' precision'
       write(*,'(a,i0,a,i0)') ' process grid p1 x p2 = ',p1,' x ',p2
+      if(trb_mpi) then
+        write(*,'(a,i0,a,a)') ' batched transforms: up to ',tr_batch,' fields per transpose, overlap ', &
+                               trim(merge('on ','off',tr_overlap))
+      else if(tr_batch > 1 .or. tr_overlap) then
+        write(*,'(a)') ' NOTE: tr_batch/tr_overlap are implemented for transpose_lib = ''mpi'' only; '// &
+                       'the transforms are done one field at a time'
+      end if
     end if
   end subroutine init_decomp
   !
@@ -307,6 +330,29 @@ contains
     !$acc enter data copyin(kxlo_r,nkx_r,zlo_r,nz_r,kzlo_c,nkz_c,ylo_c,ny_c, &
     !$acc                   own_kx,own_z,own_kz,own_y,sd_xy,rd_xy,sd_yz,rd_yz) create(sbuf,rbuf,sbuf4,rbuf4)
   end subroutine init_mpi_transposes
+  !
+  subroutine init_batched_transposes
+    implicit none
+    integer(i8) :: na,nb
+    trb_mpi = .true.
+    trb_nslot = merge(2,1,tr_overlap)
+    na = int(tr_batch,i8)*max(nxh*nzA*nyA,mz*nyA*nkx)
+    nb = int(tr_batch,i8)*max(nz*nyA*nkx,nkx*nkz*ny)
+    if(tr_single) then
+      allocate(tbA_s4(na,trb_nslot),tbA_r4(na,trb_nslot),tbB_s4(nb,trb_nslot),tbB_r4(nb,trb_nslot))
+      allocate(tbA_s(1,trb_nslot),tbA_r(1,trb_nslot),tbB_s(1,trb_nslot),tbB_r(1,trb_nslot))
+      tr_work_bytes = tr_work_bytes + 16_i8*trb_nslot*(na+nb)
+    else
+      allocate(tbA_s(na,trb_nslot),tbA_r(na,trb_nslot),tbB_s(nb,trb_nslot),tbB_r(nb,trb_nslot))
+      allocate(tbA_s4(1,trb_nslot),tbA_r4(1,trb_nslot),tbB_s4(1,trb_nslot),tbB_r4(1,trb_nslot))
+      tr_work_bytes = tr_work_bytes + 32_i8*trb_nslot*(na+nb)
+    end if
+    allocate(csA(0:p1-1,trb_nslot),dsA(0:p1-1,trb_nslot),crA(0:p1-1,trb_nslot),drA(0:p1-1,trb_nslot))
+    allocate(csB(0:p2-1,trb_nslot),dsB(0:p2-1,trb_nslot),crB(0:p2-1,trb_nslot),drB(0:p2-1,trb_nslot))
+    reqA(:) = MPI_REQUEST_NULL; reqB(:) = MPI_REQUEST_NULL
+    !$acc enter data create(tbA_s,tbA_r,tbB_s,tbB_r,tbA_s4,tbA_r4,tbB_s4,tbB_r4) &
+    !$acc            copyin(sc_xy,rc_xy,sc_yz,rc_yz)
+  end subroutine init_batched_transposes
   !
 #if defined(_USE_DIEZDECOMP)
   subroutine init_diezdecomp
@@ -951,4 +997,367 @@ contains
     call MPI_ALLTOALLV(sb,sc,sd,MPI_DOUBLE_COMPLEX,rb,rc,rd,MPI_DOUBLE_COMPLEX,comm,ierr)
     !$acc end host_data
   end subroutine alltoallv
+  !
+  ! ---------------------------------------------------------------------------
+  ! batched transposes ('mpi' only): pack/unpack one field of a group, post, wait
+  !
+  !   trb_xa / trb_ya: grid A, x-pencil / y-pencil side (comm_row)
+  !   trb_yb / trb_zb: grid B, y-pencil / z-pencil side (comm_col)
+  !   f: field in the group, nb: fields in the group, slot: buffer slot,
+  !   snd: this side sends (pack into / unpack from the send buffer), tobuf: pack (else unpack)
+  ! ---------------------------------------------------------------------------
+  !
+  subroutine trb_xa(xa,f,nb,slot,snd,tobuf)
+    implicit none
+    complex(rp), intent(inout) :: xa(nxh,nzA,nyA)
+    integer, intent(in) :: f,nb,slot
+    logical, intent(in) :: snd,tobuf
+    if(snd) then
+      call cp_xa(xa,tbA_s(:,slot),tbA_s4(:,slot),f,nb,tobuf)
+    else
+      call cp_xa(xa,tbA_r(:,slot),tbA_r4(:,slot),f,nb,tobuf)
+    end if
+  end subroutine trb_xa
+  !
+  subroutine trb_ya(ya,f,nb,slot,snd,tobuf)
+    implicit none
+    complex(rp), intent(inout) :: ya(mz,nyA,nkx)
+    integer, intent(in) :: f,nb,slot
+    logical, intent(in) :: snd,tobuf
+    if(snd) then
+      call cp_ya(ya,tbA_s(:,slot),tbA_s4(:,slot),f,nb,tobuf)
+    else
+      call cp_ya(ya,tbA_r(:,slot),tbA_r4(:,slot),f,nb,tobuf)
+    end if
+  end subroutine trb_ya
+  !
+  subroutine trb_yb(yb,f,nb,slot,snd,tobuf)
+    implicit none
+    complex(rp), intent(inout) :: yb(nz,nyA,nkx)
+    integer, intent(in) :: f,nb,slot
+    logical, intent(in) :: snd,tobuf
+    if(snd) then
+      call cp_yb(yb,tbB_s(:,slot),tbB_s4(:,slot),f,nb,tobuf)
+    else
+      call cp_yb(yb,tbB_r(:,slot),tbB_r4(:,slot),f,nb,tobuf)
+    end if
+  end subroutine trb_yb
+  !
+  subroutine trb_zb(zb,f,nb,slot,snd,tobuf)
+    implicit none
+    complex(rp), intent(inout) :: zb(nkx,nkz,ny)
+    integer, intent(in) :: f,nb,slot
+    logical, intent(in) :: snd,tobuf
+    if(snd) then
+      call cp_zb(zb,tbB_s(:,slot),tbB_s4(:,slot),f,nb,tobuf)
+    else
+      call cp_zb(zb,tbB_r(:,slot),tbB_r4(:,slot),f,nb,tobuf)
+    end if
+  end subroutine trb_zb
+  !
+  subroutine cp_xa(xa,b,b4,f,nb,tobuf)
+    ! (the branches are outside the loops, so that the copies vectorise)
+    implicit none
+    complex(rp), intent(inout) :: xa(nxh,nzA,nyA)
+    complex(rp), intent(inout), contiguous :: b(:)
+    complex(sp), intent(inout), contiguous :: b4(:)
+    integer, intent(in) :: f,nb
+    logical, intent(in) :: tobuf
+    integer :: i,j,k,p
+    if(tr_single) then
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,nyA
+          do j=1,nzA
+            do i=1,nxh
+              p = own_kx(i)
+              b4(nb*sd_xy(p)+(f-1)*sc_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1))) = cmplx(xa(i,j,k),kind=sp)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,nyA
+          do j=1,nzA
+            do i=1,nxh
+              p = own_kx(i)
+              xa(i,j,k) = cmplx(b4(nb*sd_xy(p)+(f-1)*sc_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1))),kind=rp)
+            end do
+          end do
+        end do
+      end if
+    else
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,nyA
+          do j=1,nzA
+            do i=1,nxh
+              p = own_kx(i)
+              b(nb*sd_xy(p)+(f-1)*sc_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1))) = xa(i,j,k)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,nyA
+          do j=1,nzA
+            do i=1,nxh
+              p = own_kx(i)
+              xa(i,j,k) = b(nb*sd_xy(p)+(f-1)*sc_xy(p)+1+(i-kxlo_r(p))+nkx_r(p)*((j-1)+nzA*(k-1)))
+            end do
+          end do
+        end do
+      end if
+    end if
+  end subroutine cp_xa
+  !
+  subroutine cp_ya(ya,b,b4,f,nb,tobuf)
+    ! (the branches are outside the loops, so that the copies vectorise)
+    implicit none
+    complex(rp), intent(inout) :: ya(mz,nyA,nkx)
+    complex(rp), intent(inout), contiguous :: b(:)
+    complex(sp), intent(inout), contiguous :: b4(:)
+    integer, intent(in) :: f,nb
+    logical, intent(in) :: tobuf
+    integer :: i,j,k,p
+    if(tr_single) then
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,mz
+              p = own_z(j)
+              b4(nb*rd_xy(p)+(f-1)*rc_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1))) = cmplx(ya(j,k,i),kind=sp)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,mz
+              p = own_z(j)
+              ya(j,k,i) = cmplx(b4(nb*rd_xy(p)+(f-1)*rc_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1))),kind=rp)
+            end do
+          end do
+        end do
+      end if
+    else
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,mz
+              p = own_z(j)
+              b(nb*rd_xy(p)+(f-1)*rc_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1))) = ya(j,k,i)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,mz
+              p = own_z(j)
+              ya(j,k,i) = b(nb*rd_xy(p)+(f-1)*rc_xy(p)+1+(i-1)+nkx*((j-zlo_r(p))+nz_r(p)*(k-1)))
+            end do
+          end do
+        end do
+      end if
+    end if
+  end subroutine cp_ya
+  !
+  subroutine cp_yb(yb,b,b4,f,nb,tobuf)
+    ! (the branches are outside the loops, so that the copies vectorise)
+    implicit none
+    complex(rp), intent(inout) :: yb(nz,nyA,nkx)
+    complex(rp), intent(inout), contiguous :: b(:)
+    complex(sp), intent(inout), contiguous :: b4(:)
+    integer, intent(in) :: f,nb
+    logical, intent(in) :: tobuf
+    integer :: i,j,k,p
+    if(tr_single) then
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,nz
+              p = own_kz(j)
+              b4(nb*sd_yz(p)+(f-1)*sc_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1))) = cmplx(yb(j,k,i),kind=sp)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,nz
+              p = own_kz(j)
+              yb(j,k,i) = cmplx(b4(nb*sd_yz(p)+(f-1)*sc_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1))),kind=rp)
+            end do
+          end do
+        end do
+      end if
+    else
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,nz
+              p = own_kz(j)
+              b(nb*sd_yz(p)+(f-1)*sc_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1))) = yb(j,k,i)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do i=1,nkx
+          do k=1,nyA
+            do j=1,nz
+              p = own_kz(j)
+              yb(j,k,i) = b(nb*sd_yz(p)+(f-1)*sc_yz(p)+1+(i-1)+nkx*((j-kzlo_c(p))+nkz_c(p)*(k-1)))
+            end do
+          end do
+        end do
+      end if
+    end if
+  end subroutine cp_yb
+  !
+  subroutine cp_zb(zb,b,b4,f,nb,tobuf)
+    ! (the branches are outside the loops, so that the copies vectorise)
+    implicit none
+    complex(rp), intent(inout) :: zb(nkx,nkz,ny)
+    complex(rp), intent(inout), contiguous :: b(:)
+    complex(sp), intent(inout), contiguous :: b4(:)
+    integer, intent(in) :: f,nb
+    logical, intent(in) :: tobuf
+    integer :: i,j,k,p
+    if(tr_single) then
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,ny
+          do j=1,nkz
+            do i=1,nkx
+              p = own_y(k)
+              b4(nb*rd_yz(p)+(f-1)*rc_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p)))) = cmplx(zb(i,j,k),kind=sp)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,ny
+          do j=1,nkz
+            do i=1,nkx
+              p = own_y(k)
+              zb(i,j,k) = cmplx(b4(nb*rd_yz(p)+(f-1)*rc_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p)))),kind=rp)
+            end do
+          end do
+        end do
+      end if
+    else
+      if(tobuf) then
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,ny
+          do j=1,nkz
+            do i=1,nkx
+              p = own_y(k)
+              b(nb*rd_yz(p)+(f-1)*rc_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p)))) = zb(i,j,k)
+            end do
+          end do
+        end do
+      else
+        !$acc parallel loop collapse(3) default(present) private(p) async(1)
+        do k=1,ny
+          do j=1,nkz
+            do i=1,nkx
+              p = own_y(k)
+              zb(i,j,k) = b(nb*rd_yz(p)+(f-1)*rc_yz(p)+1+(i-1)+nkx*((j-1)+nkz*(k-ylo_c(p))))
+            end do
+          end do
+        end do
+      end if
+    end if
+  end subroutine cp_zb
+  !
+  subroutine trb_post(stage,fwd,nb,slot)
+    ! start the transpose of the nb packed fields in `slot`: stage 'A' (x <-> y) or 'B' (y <-> z),
+    ! fwd: towards the spectral z-pencil (x -> y, y -> z), else backwards
+    implicit none
+    character(len=1), intent(in) :: stage
+    logical, intent(in) :: fwd
+    integer, intent(in) :: nb,slot
+    !$acc wait(1)
+    if(stage == 'A') then
+      if(fwd) then
+        csA(:,slot) = nb*sc_xy(:); dsA(:,slot) = nb*sd_xy(:); crA(:,slot) = nb*rc_xy(:); drA(:,slot) = nb*rd_xy(:)
+      else
+        csA(:,slot) = nb*rc_xy(:); dsA(:,slot) = nb*rd_xy(:); crA(:,slot) = nb*sc_xy(:); drA(:,slot) = nb*sd_xy(:)
+      end if
+      if(tr_single) then
+        call ialltoallv4(tbA_s4(:,slot),csA(:,slot),dsA(:,slot),tbA_r4(:,slot),crA(:,slot),drA(:,slot),comm_row,reqA(slot))
+      else
+        call ialltoallv(tbA_s(:,slot),csA(:,slot),dsA(:,slot),tbA_r(:,slot),crA(:,slot),drA(:,slot),comm_row,reqA(slot))
+      end if
+    else
+      if(fwd) then
+        csB(:,slot) = nb*sc_yz(:); dsB(:,slot) = nb*sd_yz(:); crB(:,slot) = nb*rc_yz(:); drB(:,slot) = nb*rd_yz(:)
+      else
+        csB(:,slot) = nb*rc_yz(:); dsB(:,slot) = nb*rd_yz(:); crB(:,slot) = nb*sc_yz(:); drB(:,slot) = nb*sd_yz(:)
+      end if
+      if(tr_single) then
+        call ialltoallv4(tbB_s4(:,slot),csB(:,slot),dsB(:,slot),tbB_r4(:,slot),crB(:,slot),drB(:,slot),comm_col,reqB(slot))
+      else
+        call ialltoallv(tbB_s(:,slot),csB(:,slot),dsB(:,slot),tbB_r(:,slot),crB(:,slot),drB(:,slot),comm_col,reqB(slot))
+      end if
+    end if
+  end subroutine trb_post
+  !
+  subroutine ialltoallv(sb,sc,sd,rb,rc,rd,comm,req)
+    ! non-blocking MPI_Alltoallv; the buffers are contiguous dummies, so MPI gets the arrays themselves
+    ! (no temporary copies that would go out of scope before the transfer is complete)
+    implicit none
+    complex(rp), intent(inout), contiguous :: sb(:),rb(:)
+    integer, intent(in), contiguous :: sc(:),sd(:),rc(:),rd(:)   ! must stay valid until the transfer is complete
+    integer, intent(in) :: comm
+    integer, intent(out) :: req
+    integer :: ierr
+    !$acc host_data use_device(sb,rb)
+    call MPI_IALLTOALLV(sb,sc,sd,MPI_DOUBLE_COMPLEX,rb,rc,rd,MPI_DOUBLE_COMPLEX,comm,req,ierr)
+    !$acc end host_data
+  end subroutine ialltoallv
+  !
+  subroutine ialltoallv4(sb,sc,sd,rb,rc,rd,comm,req)
+    implicit none
+    complex(sp), intent(inout), contiguous :: sb(:),rb(:)
+    integer, intent(in), contiguous :: sc(:),sd(:),rc(:),rd(:)   ! must stay valid until the transfer is complete
+    integer, intent(in) :: comm
+    integer, intent(out) :: req
+    integer :: ierr
+    !$acc host_data use_device(sb,rb)
+    call MPI_IALLTOALLV(sb,sc,sd,MPI_COMPLEX,rb,rc,rd,MPI_COMPLEX,comm,req,ierr)
+    !$acc end host_data
+  end subroutine ialltoallv4
+  !
+  subroutine trb_wait(stage,slot)
+    implicit none
+    character(len=1), intent(in) :: stage
+    integer, intent(in) :: slot
+    integer :: ierr
+    if(stage == 'A') then
+      call MPI_WAIT(reqA(slot),MPI_STATUS_IGNORE,ierr)
+    else
+      call MPI_WAIT(reqB(slot),MPI_STATUS_IGNORE,ierr)
+    end if
+  end subroutine trb_wait
+  !
+  subroutine trb_test
+    ! let MPI progress the transposes in flight (called between the FFTs of an overlapped group)
+    implicit none
+    integer :: ierr,n
+    logical :: done
+    do n=1,trb_nslot
+      if(reqA(n) /= MPI_REQUEST_NULL) call MPI_TEST(reqA(n),done,MPI_STATUS_IGNORE,ierr)
+      if(reqB(n) /= MPI_REQUEST_NULL) call MPI_TEST(reqB(n),done,MPI_STATUS_IGNORE,ierr)
+    end do
+  end subroutine trb_test
 end module mod_decomp

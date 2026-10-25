@@ -11,6 +11,7 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 
 - **`nl_form = 'rotational'`** (default): 9 FFT+transpose pairs per RK stage for the velocity, against 15 for
   `'advective'`. That's about 40% fewer transforms, and it is also the more robust form.
+  `'divergence'` also needs 9 (3 backward, 6 forward for the products uu…ww).
 - **Number of scalars:** each scalar adds 4 transforms per stage. With 2 scalars the transform count rises from
   9 to 17. With `scal_form = 'skew'` each scalar costs 8 transforms (2 scalars: 9 → 25). It is
   worth it when the scalars limit the stability; otherwise keep `'advective'`.
@@ -78,6 +79,70 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
     and 2D grids with few partitions in one direction (e.g. 2 × 512) the best beyond that. Measure on your case:
     the inter-node links decide.
 
+## 4b. Batched and overlapped transforms (`tr_batch`, `tr_overlap`; `transpose_lib = 'mpi'`)
+
+On many nodes the transposes are dominated by the number of messages, not only by their size. Each RK stage
+does 9 velocity transforms in 18 all-to-alls, and the message per peer shrinks as 1/(number of ranks). Two
+options act on the velocity transforms of the nonlinear term, for all three `nl_form`s:
+
+- **`tr_batch = n`**: up to n fields share one transpose message, giving n× fewer collectives with n× larger
+  messages.
+  - The rotational form transforms u, v, w and ω together (6 fields), then the three products (3 fields).
+  - The advective and divergence forms batch u, v, w (3) and, for divergence, the six products.
+  - `tr_batch = 3` is the natural choice; 6 batches the whole backward step of the rotational form.
+- **`tr_overlap = .true.`**: the groups of fields are pipelined with non-blocking `MPI_Ialltoallv` and two buffer
+  sets per transpose stage. Group g+1 is packed and sent while group g is unpacked and FFT'd, and the y→x transpose
+  of group g runs while group g−1 gets its x-FFT.
+  - Combine it with a `tr_batch` smaller than the number of fields (e.g. 1 or 3), so there are several groups to
+    pipeline.
+  - Real overlap needs an MPI that progresses non-blocking collectives in the background. Many need a setting
+    for that, e.g. `MPICH_ASYNC_PROGRESS=1`, Open MPI with a progress thread, or a hardware offload. Without it
+    the transfer advances only inside the `MPI_Test` calls HiCHAN makes between FFTs.
+  - On GPUs every pack kernel is followed by `acc wait` before the message is posted, so it still needs
+    CUDA-aware MPI.
+- **Results** are bit-identical to the default.
+  - Checked with bounds checking for the rotational, advective, divergence and `'vv'` paths, double and single
+    precision, on 1–4 ranks, `tr_batch` 1–6 with and without overlap: all `log.dat` identical. See the README
+    validation table.
+- **Memory:** the batch buffers are 40 · `tr_batch` · (2 with overlap, else 1) bytes per grid point (half with
+  `transpose_prec = 'single'`), for example:
+
+  | setting | extra memory per grid point |
+  |---|---|
+  | `tr_batch = 3`, no overlap | 120 B |
+  | `tr_batch = 1`, overlap | 80 B |
+  | `tr_batch = 3`, overlap | 240 B |
+
+  The rotational form also needs one more physical work array (18 B per point). Compare this with about 330 B
+  per point for the whole code: check the memory report at start-up before using it on a full GPU.
+- **Measured so far: only on one CPU node** (4 ranks, 96×97×96, laptop, shared-memory MPI). The variants are as
+  fast as the default within the noise: 711–724 ms/step against 719–724 for the 4×1 grid, and 701–718 against
+  697–709 for the divergence form. There is no network latency to hide there. The gain has to be measured on
+  several nodes: run 200 steps each of `tr_batch = 1`, `3` and `3` + `tr_overlap` with `timing = .true.`, and
+  compare the `FFTs incl. transposes` line.
+- With cuDecomp or diezDecomp the options are accepted, with a note at start-up. The transforms are then done one
+  field at a time (the same results; cuDecomp's own NCCL/NVSHMEM backends are often faster on NVLink anyway).
+
+## Further steps for many GPUs/nodes (not implemented)
+
+From the analysis of the dealiasing and communication path, after Diez Sanhueza et al. (CPC 2025):
+
+- **Dealiasing order: already optimal.**
+  - The z-padding is applied after the first transpose, and the x-padding after the second. So zeros are never
+    sent, and the only padded data that are communicated are the z-physical values in the x↔y transposes
+    (nx/2 × 3nz/2 × ny).
+  - Per transform the communicated volume is 2.5 units of nx/2·nz·ny complex values, against 4.5 when both
+    directions are padded before the first transpose.
+  - The order z first, x last is the cheaper one, because the last transform is complex-to-real. With x first
+    the padded transpose would carry 3nx/2 × nz complex values, twice as much.
+- **Rank placement:** cx1 = mod(rank, p1), so the padded x↔y transposes (comm_row) stay within a node when p1 ≤
+  GPUs per node and the ranks are placed node by node (`--ntasks-per-node`, `--map-by`). See section 4.
+- **Scalars:** their transforms are not batched yet (4–8 per scalar and stage). With several scalars, batching
+  their gradients is the next step (it needs three more physical work arrays per batch).
+- **Phase-shift dealiasing instead of the 3/2 rule:** 20% less transpose volume and 2.25× less FFT work. With RK3
+  the double-fold (corner) aliases are not cancelled, so this is an accuracy trade-off.
+- **P-TDMA** (see the table below).
+
 ## Memory
 
 At start-up HiCHAN prints the memory of its large arrays per rank (max over the ranks), before allocating them,
@@ -130,6 +195,7 @@ If a case does not fit:
 |---|---|
 | diezDecomp transposes, with local copies instead of MPI | available: `transpose_lib = 'diezdecomp'` |
 | keep the number of partitions of the wall-normal direction small (p2 here), or use slabs | `pdims`, see section 4 |
+| fewer, larger messages and overlap of communication and computation (the paper's analysis of what dominates at scale) | `tr_batch`, `tr_overlap` (section 4b), `'mpi'` transposes |
 | P-TDMA: distributed wall-normal tridiagonal solves (cyclic reduction plus a reduced system), which remove the transposes to wall-normal pencils | not implemented. In HiCHAN the wall-normal operators are compact (tridiagonal A and banded B up to ±3) with influence-matrix wall conditions, which couple both walls and use dense first and last rows of D1. A distributed version needs a banded (SPIKE/block cyclic reduction) solver and global wall couplings. The paper gains 1.5× per step at 1024 GPUs, but for slab grids, the natural choice at moderate GPU counts, these transposes are already local. Worth it only for very large runs |
 | splitting the implicit solves into a set-up part and a run-time part | already done in this form: the influence matrices and the implicit 6×6/2×2 corrections are cached per wavenumber (and RK substep), and the banded factorisations are rebuilt on the fly from a few shared coefficient rows. Storing per-column factors would increase memory traffic on the GPU |
 | direct x↔z transposes for the implicit 1D diffusion | not applicable: HiCHAN always needs the intermediate z-FFT pencil |

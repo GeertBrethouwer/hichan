@@ -165,8 +165,11 @@ contains
     ph = 8_i8*mx*nzA*nyA
     ng = 1
     if(nscal > 0 .and. trim(scal_form) /= 'advective') ng = 2
+    if(trim(nl_form) == 'divergence') ng = 2
     if(trim(nl_form) == 'rotational') ng = 3
+    if(trim(nl_form) == 'rotational' .and. (tr_batch > 1 .or. tr_overlap)) ng = 4
     b(1) = sp*(11+3*max(nscal,1))
+    if(trim(nl_form) == 'divergence') b(1) = b(1) + 2*sp
     b(2) = ph*(4+ng)
     b(3) = sp*5 + 8_i8*36*nkx*nkz
     b(4) = 0

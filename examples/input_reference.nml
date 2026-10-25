@@ -49,7 +49,8 @@
                                        !   (6-point one-sided, more accurate) or 'compact' (compact D1
                                        !   row: divergence at round-off also in the wall rows)
   nl_form    = 'rotational'            ! nonlinear term: 'rotational' (u x omega, energy conserving,  ['rotational']
-                                       !   9 FFTs) or 'advective' (as in the paper, 15 FFTs)
+                                       !   9 FFTs), 'advective' (as in the paper, 15 FFTs) or
+                                       !   'divergence' (div(uu), conserves momentum, 9 FFTs)
   visc_theta = 0.0                     ! viscous term: 0 = explicit (App. B.1); >0 = implicit theta-  [0.0]
                                        !   method (App. B.2), 0.5 = Crank-Nicolson, 1 = backward Euler
   impl_maxit = 10                      ! implicit only: max. iterations of the velocity-pressure      [10]
@@ -183,4 +184,10 @@
                                        !    6 NVSHMEM, 7 NVSHMEM_PL, 8 NVSHMEM_SM)
   cudecomp_enable_nccl    = .true.     ! allow NCCL backends in the autotuning                        [.true.]
   cudecomp_enable_nvshmem = .false.    ! allow NVSHMEM backends (cuDecomp built with NVSHMEM=1)        [.false.]
+  tr_batch                = 1          ! 'mpi' only: fields per transpose message in the velocity      [1]
+                                       !   transforms (u, v, w and the vorticity: up to 6; 3 is a
+                                       !   natural choice); fewer, larger messages. See PERF.md
+  tr_overlap              = .false.    ! 'mpi' only: pipeline those transforms, so the transposes of   [.false.]
+                                       !   one group of fields run while the previous group is FFT'd
+                                       !   (non-blocking MPI_Ialltoallv, two buffer sets)
 /

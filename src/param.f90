@@ -33,7 +33,8 @@ module mod_param
   real(rp) :: visc_theta = 0._rp          ! theta of the viscous term (0: explicit, Appendix B.1; >0: implicit, B.2)
   integer  :: impl_maxit = 10              ! max. iterations of the implicit pressure/velocity coupling (B.2)
   real(rp) :: impl_tol = 1.e-12_rp         ! convergence: max|v^{m+1}-v^m| < impl_tol*max|v|
-  character(len=16) :: nl_form = 'rotational' ! 'rotational' (energy conserving, 9 FFTs) or 'advective' (as in the paper, 15 FFTs)
+  character(len=16) :: nl_form = 'rotational' ! 'rotational' (energy conserving, 9 FFTs), 'advective' (as in the paper,
+                                              ! 15 FFTs) or 'divergence' (div(uu), conserves momentum, 9 FFTs)
   !
   ! &time
   !
@@ -93,6 +94,10 @@ module mod_param
   character(len=8)  :: transpose_prec = 'double' ! data sent in the transposes: 'double' or 'single'
                                                  ! (rounded to single precision; computation stays double)
   integer :: cudecomp_t_backend = 0        ! 0 -> autotune, otherwise CUDECOMP_TRANSPOSE_COMM_* value
+  integer :: tr_batch = 1                  ! fields per transpose message in the batched transforms
+                                           ! (1: one field per message)
+  logical :: tr_overlap = .false.          ! pipeline the batched transforms: non-blocking transposes of one
+                                           ! group of fields overlap the FFTs of the previous group
   logical :: cudecomp_enable_nccl = .true., cudecomp_enable_nvshmem = .false.
   !
   ! derived quantities
@@ -127,7 +132,8 @@ contains
                       mode_log_kx,mode_log_kz,timing,timing_sync
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit,scal_form
     namelist /buoyancy/ gravity,ri
-    namelist /parallel/ pdims,transpose_lib,transpose_prec,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
+    namelist /parallel/ pdims,transpose_lib,transpose_prec,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem, &
+                       tr_batch,tr_overlap
     !
     open(newunit=iunit,file='input.nml',status='old',action='read',iostat=ios)
     if(ios /= 0) call abort_run('cannot open input.nml')
@@ -160,8 +166,10 @@ contains
     if(any(scal_theta(:) < 0._rp .or. scal_theta(:) > 1._rp)) call abort_run('0 <= scal_theta <= 1 required')
     if(nscal < 0 .or. nscal > nscal_max) call abort_run('0 <= nscal <= 16 required')
     if(all(forcing /= ['cfr','cpg'])) call abort_run('forcing must be cfr or cpg')
-    if(all(nl_form /= ['advective ','rotational'])) call abort_run('nl_form must be advective or rotational')
+    if(all(nl_form /= ['advective ','rotational','divergence'])) &
+      call abort_run("nl_form must be 'rotational', 'advective' or 'divergence'")
     if(all(transpose_prec /= ['double','single'])) call abort_run("transpose_prec must be 'double' or 'single'")
+    if(tr_batch < 1) call abort_run('tr_batch >= 1 required')
     if(all(scal_form /= ['advective ','divergence','skew      '])) &
       call abort_run("scal_form must be 'advective', 'divergence' or 'skew'")
     nxh = nx/2

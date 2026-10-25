@@ -14,7 +14,7 @@ module mod_rk
   use mod_param
   use mod_decomp , only: nkx,nkz,nzA,nyA,yA_lo,zA_lo
   use mod_fields
-  use mod_fft    , only: fwd_fft,bwd_fft
+  use mod_fft    , only: fwd_fft,bwd_fft,fwd_fft_n,bwd_fft_n,cfield,rfield
   use mod_timer  , only: tic,toc,tm_nl,tm_dt,tm_vsolve,tm_ssolve
   use mod_ysolve , only: deriv1,deriv1m,add_lap,pressure_step,scalar_solve,cfr_correct,kxv,kzv,mean_owner,i00,j00, &
                          set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max, &
@@ -97,6 +97,53 @@ contains
     end if
   end subroutine phys_prod
   !
+  subroutine phys_mul(a,c)
+    ! c = a*c
+    implicit none
+    real(rp), intent(in) :: a(mx,nzA,nyA)
+    real(rp), intent(inout) :: c(mx,nzA,nyA)
+    integer :: i,j,k
+    !$acc parallel loop collapse(3) default(present) async(1)
+    do k=1,nyA
+      do j=1,nzA
+        do i=1,mx
+          c(i,j,k) = a(i,j,k)*c(i,j,k)
+        end do
+      end do
+    end do
+  end subroutine phys_mul
+  !
+  subroutine phys_sq(c)
+    ! c = c*c
+    implicit none
+    real(rp), intent(inout) :: c(mx,nzA,nyA)
+    integer :: i,j,k
+    !$acc parallel loop collapse(3) default(present) async(1)
+    do k=1,nyA
+      do j=1,nzA
+        do i=1,mx
+          c(i,j,k) = c(i,j,k)*c(i,j,k)
+        end do
+      end do
+    end do
+  end subroutine phys_sq
+  !
+  subroutine div_combine(fx,fz,g)
+    ! g = -(i kx fx + g + i kz fz): divergence of a flux (fx, ., fz) whose wall-normal derivative is in g
+    implicit none
+    complex(rp), intent(in)    :: fx(nkx,nkz,ny),fz(nkx,nkz,ny)
+    complex(rp), intent(inout) :: g(nkx,nkz,ny)
+    integer :: i,j,k
+    !$acc parallel loop collapse(3) default(present) async(1)
+    do k=1,ny
+      do j=1,nkz
+        do i=1,nkx
+          g(i,j,k) = -(cmplx(0._rp,kxv(i),rp)*fx(i,j,k) + g(i,j,k) + cmplx(0._rp,kzv(j),rp)*fz(i,j,k))
+        end do
+      end do
+    end do
+  end subroutine div_combine
+  !
   subroutine advect(f,fac,metric)
     ! ap = fac*(u df/dx + v df/dy + w df/dz) in physical space (advective form);
     ! metric: d/dy through the uniform computational grid (deriv1m) instead of the compact D1
@@ -157,13 +204,53 @@ contains
     real(rp), intent(out) :: dtnew
     integer :: n,i,j,k
     real(rp) :: qc,qu,fa
-    logical  :: skew
-    call bwd_fft(u,up)
-    call bwd_fft(v,vp)
-    call bwd_fft(w,wp)
+    logical  :: skew,batched,rot
+    type(cfield) :: cf(6)
+    type(rfield) :: rf(6)
+    !
+    ! batched transforms (tr_batch > 1 or tr_overlap): u, v, w and, for the rotational form, the
+    ! vorticity are transformed in one call, and the three products in one call. Same arithmetic
+    ! as the one-field-at-a-time path below.
+    !
+    batched = (tr_batch > 1 .or. tr_overlap)
+    rot = (trim(nl_form) == 'rotational')
+    if(batched) then
+      cf(1)%p => u ; cf(2)%p => v ; cf(3)%p => w
+      rf(1)%p => up; rf(2)%p => vp; rf(3)%p => wp
+      if(rot) then
+        ! spectral vorticity in nu, nv, nw (overwritten by the nonlinear terms below)
+        call deriv1(w,nu)                          ! omega_x = dw/dy - dv/dz
+        call spec_axpy(v,nu,0._rp,-1._rp,1._rp)
+        call spec_mul(u,nv,0._rp,1._rp)            ! omega_y = du/dz - dw/dx
+        call spec_axpy(w,nv,-1._rp,0._rp,1._rp)
+        call deriv1(u,nw)                          ! omega_z = dv/dx - du/dy
+        call spec_axpy(v,nw,1._rp,0._rp,-1._rp)
+        cf(4)%p => nu; cf(5)%p => nv; cf(6)%p => nw
+        rf(4)%p => gp(:,:,:,1); rf(5)%p => gp(:,:,:,2); rf(6)%p => gp(:,:,:,3)
+        call bwd_fft_n(6,cf,rf)
+      else
+        call bwd_fft_n(3,cf,rf)
+      end if
+    else
+      call bwd_fft(u,up)
+      call bwd_fft(v,vp)
+      call bwd_fft(w,wp)
+    end if
     dtnew = dt
     if(is_first .and. .not.fixed_dt) then
       call tic(tm_dt); dtnew = compute_dt(); call toc(tm_dt)
+    end if
+    if(batched .and. rot) then
+      ! N = u x omega: N_x in ap, N_y in gp(4), N_z in gp(3) (omega_z is no longer needed by then)
+      call phys_prod(vp,gp(:,:,:,3),ap, 1._rp,.false.)
+      call phys_prod(wp,gp(:,:,:,2),ap,-1._rp,.true.)
+      call phys_prod(wp,gp(:,:,:,1),gp(:,:,:,4), 1._rp,.false.)
+      call phys_prod(up,gp(:,:,:,3),gp(:,:,:,4),-1._rp,.true.)
+      call phys_prod(up,gp(:,:,:,2),gp(:,:,:,3), 1._rp,.false.)
+      call phys_prod(vp,gp(:,:,:,1),gp(:,:,:,3),-1._rp,.true.)
+      rf(1)%p => ap; rf(2)%p => gp(:,:,:,4); rf(3)%p => gp(:,:,:,3)
+      cf(1)%p => nu; cf(2)%p => nv; cf(3)%p => nw
+      call fwd_fft_n(3,rf,cf)
     end if
     !
     ! scalars first (only up, vp, wp are needed)
@@ -210,7 +297,29 @@ contains
     !
     ! momentum
     !
-    if(trim(nl_form) == 'advective') then
+    if(batched .and. rot) then
+      continue                                     ! done above
+    else if(trim(nl_form) == 'divergence') then
+      ! N = -div(u u) from the six products. Physical: vv -> ap, vw -> gp(1), ww -> gp(2), then in
+      ! place uw -> wp, uv -> vp, uu -> up (the velocities are not needed after this point).
+      ! Spectral: uu -> tmp1, uv -> tmp2, uw -> tmp3, vv -> nu, vw -> tmp4, ww -> nv; nw is the
+      ! work array of the first wall-normal derivative.
+      call phys_prod(vp,vp,ap,1._rp,.false.)
+      call phys_prod(vp,wp,gp(:,:,:,1),1._rp,.false.)
+      call phys_prod(wp,wp,gp(:,:,:,2),1._rp,.false.)
+      call phys_mul(up,wp)
+      call phys_mul(up,vp)
+      call phys_sq(up)
+      rf(1)%p => up; rf(2)%p => vp; rf(3)%p => wp; rf(4)%p => ap; rf(5)%p => gp(:,:,:,1); rf(6)%p => gp(:,:,:,2)
+      cf(1)%p => tmp1; cf(2)%p => tmp2; cf(3)%p => tmp3; cf(4)%p => nu; cf(5)%p => tmp4; cf(6)%p => nv
+      call fwd_fft_n(6,rf,cf)
+      call deriv1(tmp4,nw)                         ! N_z = -(d(uw)/dx + d(vw)/dy + d(ww)/dz)
+      call div_combine(tmp3,nv,nw)
+      call deriv1(nu,nv)                           ! N_y = -(d(uv)/dx + d(vv)/dy + d(vw)/dz)
+      call div_combine(tmp2,tmp4,nv)
+      call deriv1(tmp2,nu)                         ! N_x = -(d(uu)/dx + d(uv)/dy + d(uw)/dz)
+      call div_combine(tmp1,tmp3,nu)
+    else if(trim(nl_form) == 'advective') then
       call advect(u,-1._rp,.false.)
       call fwd_fft(ap,nu)
       call advect(v,-1._rp,.false.)

@@ -8,11 +8,17 @@
 !
 ! GPU: cuFFT batched plans on the OpenACC stream (as in CaNS); CPU: FFTW3.
 !
+! bwd_fft_n / fwd_fft_n transform several fields in one call. With transpose_lib = 'mpi' and
+! tr_batch > 1 or tr_overlap, the fields are sent in groups of up to tr_batch per transpose
+! message, and with tr_overlap the groups are pipelined: the transposes of one group run while the
+! previous group is transformed. The arithmetic is the same as one fwd_fft/bwd_fft per field.
+!
 module mod_fft
   use, intrinsic :: iso_c_binding
   use mod_types
-  use mod_param , only: nxh,nz,ny,mx,mz,abort_run
-  use mod_decomp, only: nzA,nyA,nkx,nkz,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb
+  use mod_param , only: nxh,nz,ny,mx,mz,abort_run,tr_batch,tr_overlap
+  use mod_decomp, only: nzA,nyA,nkx,nkz,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb, &
+                        trb_mpi,trb_nslot,trb_xa,trb_ya,trb_yb,trb_zb,trb_post,trb_wait,trb_test
   use mod_timer , only: tic,toc,tm_fft,tm_tr
 #if defined(_OPENACC)
   use cufft
@@ -23,7 +29,14 @@ module mod_fft
   include 'fftw3.f03'
 #endif
   private
-  public :: init_fft,fwd_fft,bwd_fft,end_fft,fft_buffer_bytes
+  public :: init_fft,fwd_fft,bwd_fft,end_fft,fft_buffer_bytes,fwd_fft_n,bwd_fft_n
+  ! lists of fields for the batched transforms
+  type, public :: cfield
+    complex(rp), pointer, contiguous :: p(:,:,:) => null()
+  end type cfield
+  type, public :: rfield
+    real(rp), pointer, contiguous :: p(:,:,:) => null()
+  end type rfield
   !
   ! work buffers, shared by stages that are never active at the same time:
   !   bufp: cxw(mx/2+1,nzA,nyA) (x-FFT, spectral side)  and  yaw(mz,nyA,nkx) (z-FFT)
@@ -151,6 +164,160 @@ contains
     call bwd_x(bufa,bufp,phys)                                    ! xaw -> cxw -> phys
     call toc(tm_fft)
   end subroutine bwd_fft
+  !
+  subroutine bwd_fft_n(nf,fh,phys)
+    !
+    ! bwd_fft for nf fields: fh(f)%p -> phys(f)%p
+    !
+    implicit none
+    integer, intent(in) :: nf
+    type(cfield), intent(in) :: fh(nf)
+    type(rfield), intent(in) :: phys(nf)
+    integer :: nb,ng,g,f
+    if(.not.trb_mpi) then
+      do f=1,nf
+        call bwd_fft(fh(f)%p,phys(f)%p)
+      end do
+      return
+    end if
+    call tic(tm_fft)
+    nb = min(tr_batch,nf)
+    ng = (nf+nb-1)/nb
+    if(tr_overlap) then
+      call send_b(1)
+      do g=1,ng
+        if(g < ng) call send_b(g+1)
+        call recv_b_send_a(g)
+        if(g > 1) call recv_a(g-1)
+      end do
+      call recv_a(ng)
+    else
+      do g=1,ng
+        call send_b(g)
+        call recv_b_send_a(g)
+        call recv_a(g)
+      end do
+    end if
+    call toc(tm_fft)
+  contains
+    subroutine send_b(g)                                        ! fh -> grid-B send buffer, post z -> y
+      integer, intent(in) :: g
+      integer :: f,f1,n,s
+      call group(g,f1,n,s)
+      do f=1,n
+        call tic(tm_tr); call trb_zb(fh(f1+f-1)%p,f,n,s,.true.,.true.); call toc(tm_tr)
+      end do
+      call tic(tm_tr); call trb_post('B',.false.,n,s); call toc(tm_tr)
+    end subroutine send_b
+    subroutine recv_b_send_a(g)                                 ! ybw -> z-FFT -> yaw, post y -> x
+      integer, intent(in) :: g
+      integer :: f,f1,n,s
+      call group(g,f1,n,s)
+      call tic(tm_tr); call trb_wait('B',s); call toc(tm_tr)
+      do f=1,n
+        call tic(tm_tr); call trb_yb(bufa,f,n,s,.false.,.false.); call toc(tm_tr)
+        call bwd_z(bufa,bufp)
+        call tic(tm_tr); call trb_ya(bufp,f,n,s,.true.,.true.); call toc(tm_tr)
+        call trb_test
+      end do
+      call tic(tm_tr); call trb_post('A',.false.,n,s); call toc(tm_tr)
+    end subroutine recv_b_send_a
+    subroutine recv_a(g)                                        ! xaw -> x-FFT -> phys
+      integer, intent(in) :: g
+      integer :: f,f1,n,s
+      call group(g,f1,n,s)
+      call tic(tm_tr); call trb_wait('A',s); call toc(tm_tr)
+      do f=1,n
+        call tic(tm_tr); call trb_xa(bufa,f,n,s,.false.,.false.); call toc(tm_tr)
+        call bwd_x(bufa,bufp,phys(f1+f-1)%p)
+        call trb_test
+      end do
+    end subroutine recv_a
+    subroutine group(g,f1,n,s)
+      integer, intent(in) :: g
+      integer, intent(out) :: f1,n,s
+      f1 = (g-1)*nb+1
+      n  = min(nb,nf-f1+1)
+      s  = mod(g-1,trb_nslot)+1
+    end subroutine group
+  end subroutine bwd_fft_n
+  !
+  subroutine fwd_fft_n(nf,phys,fh)
+    !
+    ! fwd_fft for nf fields: phys(f)%p -> fh(f)%p; the physical fields may be overwritten
+    !
+    implicit none
+    integer, intent(in) :: nf
+    type(rfield), intent(in) :: phys(nf)
+    type(cfield), intent(in) :: fh(nf)
+    integer :: nb,ng,g,f
+    if(.not.trb_mpi) then
+      do f=1,nf
+        call fwd_fft(phys(f)%p,fh(f)%p)
+      end do
+      return
+    end if
+    call tic(tm_fft)
+    nb = min(tr_batch,nf)
+    ng = (nf+nb-1)/nb
+    if(tr_overlap) then
+      call send_a(1)
+      do g=1,ng
+        if(g < ng) call send_a(g+1)
+        call recv_a_send_b(g)
+        if(g > 1) call recv_b(g-1)
+      end do
+      call recv_b(ng)
+    else
+      do g=1,ng
+        call send_a(g)
+        call recv_a_send_b(g)
+        call recv_b(g)
+      end do
+    end if
+    call toc(tm_fft)
+  contains
+    subroutine send_a(g)                                        ! phys -> x-FFT -> xaw, post x -> y
+      integer, intent(in) :: g
+      integer :: f,f1,n,s
+      call group(g,f1,n,s)
+      do f=1,n
+        call fwd_x(phys(f1+f-1)%p,bufp,bufa)
+        call tic(tm_tr); call trb_xa(bufa,f,n,s,.true.,.true.); call toc(tm_tr)
+        call trb_test
+      end do
+      call tic(tm_tr); call trb_post('A',.true.,n,s); call toc(tm_tr)
+    end subroutine send_a
+    subroutine recv_a_send_b(g)                                 ! yaw -> z-FFT -> ybw, post y -> z
+      integer, intent(in) :: g
+      integer :: f,f1,n,s
+      call group(g,f1,n,s)
+      call tic(tm_tr); call trb_wait('A',s); call toc(tm_tr)
+      do f=1,n
+        call tic(tm_tr); call trb_ya(bufp,f,n,s,.false.,.false.); call toc(tm_tr)
+        call fwd_z(bufp,bufa)
+        call tic(tm_tr); call trb_yb(bufa,f,n,s,.true.,.true.); call toc(tm_tr)
+        call trb_test
+      end do
+      call tic(tm_tr); call trb_post('B',.true.,n,s); call toc(tm_tr)
+    end subroutine recv_a_send_b
+    subroutine recv_b(g)                                        ! grid-B receive buffer -> fh
+      integer, intent(in) :: g
+      integer :: f,f1,n,s
+      call group(g,f1,n,s)
+      call tic(tm_tr); call trb_wait('B',s); call toc(tm_tr)
+      do f=1,n
+        call tic(tm_tr); call trb_zb(fh(f1+f-1)%p,f,n,s,.false.,.false.); call toc(tm_tr)
+      end do
+    end subroutine recv_b
+    subroutine group(g,f1,n,s)
+      integer, intent(in) :: g
+      integer, intent(out) :: f1,n,s
+      f1 = (g-1)*nb+1
+      n  = min(nb,nf-f1+1)
+      s  = mod(g-1,trb_nslot)+1
+    end subroutine group
+  end subroutine fwd_fft_n
   !
   subroutine fwd_x(phys,cxw,xaw)
     implicit none

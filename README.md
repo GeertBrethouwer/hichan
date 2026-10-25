@@ -145,6 +145,12 @@ is no pressure coupling. The explicit part `(1−θ)` and the right-hand side fo
   under-resolved test (32×65×32 at Re_τ ≈ 180), it blew up during the transition from strong random noise, while
   the rotational form stayed stable. Restarted from the developed turbulent field, it ran stably. Use it at DNS
   resolution, or start transition with the rotational form.
+* `'divergence'`: `∇·(uu)` from the six products uu, uv, uw, vv, vw, ww, i.e. 3 + 6 = 9 FFTs per stage, as for the
+  rotational form. It conserves momentum discretely, because the mean of a derivative is a pure wall flux, but not
+  the kinetic energy. The pressure is the static pressure, as with `'advective'`. Tests on tanh α_s = 4 and 5 are
+  in compact_fd_spectral_solver's `dns_forms/` (stable on the coarse turbulent channel 32×65×32 at Re_τ ≈ 200; the
+  most accurate of the three forms for the linear TS wave at Ny = 65; less robust than the rotational form on
+  under-resolved TS waves at Ny = 33). It needs two more spectral work arrays (16 B per point).
 
 **Scalar advection** (`scal_form` in `&scalars`):
 
@@ -270,6 +276,8 @@ buoyancy force.
 | diezDecomp transposes (`transpose_lib = 'diezdecomp'`, CPU build) | bit-identical `log.dat` and `stats.dat` to the MPI transposes on 1–4 ranks, 8 process grids including uneven splits; OpenACC host-fallback build agrees to round-off (divergence) |
 | Single-precision transposes (`transpose_prec = 'single'`, MPI and diezDecomp, CPU and OpenACC builds) | identical on 1, 3 and 4 ranks (rounding is decomposition independent); MPI and diezDecomp bit-identical. TS wave (amplitude 1e-6): decay rate as with double to 5e-8 (relative). Turbulent channel 32×65×32 restarted from a developed field, t = 0–40: the trajectories separate slowly (relative difference of the kinetic energy 1e-7 at t = 18, 2e-5 at t = 40, chaotic growth). Statistics over t = 10–40 agree to all printed digits: Re_τ 201.87, U_c⁺ 16.057, u_rms⁺ 2.635, −uv⁺ 0.788. Divergence still ~1e-14 |
 | Restart | 20 steps straight vs. 10 + restart + 10 (restarting on 3 instead of 2 ranks): bit-identical |
+| Batched and overlapped transforms (`tr_batch` 1–6, `tr_overlap`, `'mpi'`) | `log.dat` bit-identical to the default for `nl_form` rotational, advective and divergence, `'im'` and `'vv'`, double and single precision, 1–4 ranks, with bounds checking: final code 192 runs on process grids 1×1, 3×1, 2×2, 1×4; earlier versions of the same code (differing only in the pack loops and MPI wrappers) also on 2×1 and 1×2, 468 runs. Default path bit-identical to the previous version. Time per step on one CPU node (4 ranks): the same as the default within the noise |
+| `nl_form = 'divergence'` | 200 steps of the coarse turbulent channel (α_s = 4) agree to all printed digits with an independent implementation (three `∇·(u_i u)` per component, 12 transforms). Linear TS wave (α_s = 4, Ny = 65): decay rate within 1.4e-5 of Orr–Sommerfeld (rotational 5.1e-4, advective 1.3e-4, fitted over 50 < t ≤ 100) |
 | OpenACC code path | built with `gfortran -fopenacc` (host fallback), with cuFFT emulated by FFTW using the same layout parameters: results identical to the CPU build |
 
 ## Building
@@ -315,6 +323,15 @@ before the data move. Small streamwise modes therefore keep their own relative p
 are weaker than about 1e-6·U (e.g. initial streaks in receptivity or transient-growth studies) are then
 contaminated, so use `'double'` for such cases. 3D field output (`iout_field`) also goes through the transposes.
 
+**Batched and overlapped transforms** (`tr_batch`, `tr_overlap`, `transpose_lib = 'mpi'` only): the velocity
+transforms of the nonlinear term are done in two calls per RK stage instead of nine. One call transforms u, v, w
+and the vorticity to physical space, the other the three products back. With `tr_batch = n` up to n fields share
+one transpose message, giving fewer and larger messages (fewer latencies on many nodes). With
+`tr_overlap = .true.` the fields are pipelined with non-blocking `MPI_Ialltoallv`: the transposes of one group of
+fields run while the previous group is transformed. The arithmetic is unchanged: results are bit-identical to the
+default. See PERF.md for the cost in memory and when it helps. With cuDecomp or diezDecomp the options are
+accepted, but the transforms are done one field at a time.
+
 diezDecomp transposes real arrays. HiCHAN's spectral data are complex, so the real and imaginary parts are stacked
 along the axis that the transpose leaves in place (y for the x↔z-FFT transposes, kx for the z-FFT↔wall-normal
 transposes). Each complex transpose is then one real transpose of the same data volume, plus one extra copy on the
@@ -354,13 +371,13 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | namelist | contents |
 |---|---|
 | `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `dealias` |
-| `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
+| `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`/`divergence`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
 | `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
-| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
+| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem`, `tr_batch`, `tr_overlap` (batched and overlapped transforms, `'mpi'` only; see PERF.md) |
 
 ## Output (in `data_dir`)
 
