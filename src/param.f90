@@ -16,6 +16,8 @@ module mod_param
   real(rp) :: grid_alpha = 2._rp           ! stretching parameter alpha_s of Eq. (41)
   character(len=256) :: grid_file = 'grid.in'
   integer  :: fd_order = 6                 ! 4 -> (3-4-3), 6 -> (3-5-6-5-3) compact schemes
+  character(len=8) :: y_scheme = 'compact' ! 'compact' (fd_order) or 'sbp48': diagonal-norm SBP 4-8 D1, D2 = D1 D1
+                                           !   (prototype; needs make SBP=1)
   logical  :: dealias = .true.             ! 3/2 rule in x and z
   !
   ! &physics
@@ -124,7 +126,7 @@ contains
     implicit none
     integer, intent(in) :: myid
     integer :: iunit,ios
-    namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
+    namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,y_scheme,dealias
     namelist /physics/ re,forcing,ubulk,dpdx,ns_method,vv_neumann,nl_form,visc_theta,impl_maxit,impl_tol
     namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
@@ -157,6 +159,9 @@ contains
     if(mod(nx,2) /= 0 .or. mod(nz,2) /= 0) call abort_run('nx and nz must be even')
     if(ny < 9) call abort_run('ny must be at least 9')
     if(all(fd_order /= [4,6])) call abort_run('fd_order must be 4 or 6')
+    if(all(y_scheme /= ['compact','sbp48  '])) call abort_run("y_scheme must be 'compact' or 'sbp48'")
+    if(y_scheme == 'sbp48' .and. ny < 25) call abort_run("y_scheme = 'sbp48' needs ny >= 25")
+    if(y_scheme == 'sbp48' .and. ns_method == 'vv') call abort_run("y_scheme = 'sbp48' is not available with ns_method = 'vv'")
     if(dt <= 0._rp) call abort_run('dt must be > 0')
     if(ls_nmin < 1 .or. ls_nmax < ls_nmin) call abort_run('&init: 1 <= ls_nmin <= ls_nmax required')
     if(dt_growth < 1._rp) call abort_run('dt_growth must be >= 1')
@@ -200,7 +205,11 @@ contains
       write(*,fr) 'box lx, lz (half-height h = 1)',lx,lz
       write(*,f1) 'wall-normal grid',trim(grid_type)
       if(trim(grid_type) == 'tanh') write(*,fr) '  stretching alpha_s',grid_alpha
-      write(*,fi) 'compact scheme order',fd_order
+      if(y_scheme == 'sbp48') then
+        write(*,f1) 'wall-normal scheme','SBP 4-8 (diagonal norm), D2 = D1 D1'
+      else
+        write(*,fi) 'compact scheme order',fd_order
+      end if
       write(*,f1) '3/2 dealiasing',merge('yes','no ',dealias)
       write(*,fr) 'Reynolds number re',re
       if(forcing == 'cfr') then

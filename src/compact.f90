@@ -9,13 +9,24 @@
 !   fd_order = 6 : (3-5-6-5-3)   tridiagonal LHS, 3rd/5th-order closures
 ! A1 and A2 are tridiagonal; B1 and B2 are banded with offsets in [-3,3].
 !
+! y_scheme = 'sbp48' (prototype, needs make SBP=1): diagonal-norm summation-by-parts first derivative of
+! interior order 8 and boundary order 4 (Mattsson & Nordstrom 2004, closure of compact_fd_spectral_solver/
+! tests/sbp_diag.py) on the uniform grid xi, mapped: D1 = diag(1/y_xi) D_xi, i.e. A1 = diag(y_xi), B1 = D_xi.
+! With the norm H_y = H dxi diag(y_xi), H_y D1 + D1^T H_y = diag(-1,0,..,0,1) on any monotone grid.
+! The second derivative is D2 = D1 D1 (A2 = A1, B2 = D_xi diag(1/y_xi) D_xi, offsets in [-15,15]): with
+! u = 0 at the walls (u, D2 u)_H = -|D1 u|_H^2, so the viscous term is dissipative in the same norm.
+!
 module mod_compact
   use mod_types
   use mod_param, only: abort_run
   implicit none
   private
   public :: init_grid,init_compact,mat_band_apply
+#ifdef _SBP48
+  integer, parameter, public :: nbw = 15       ! max. half-bandwidth of B1/B2 (SBP 4-8: D2 = D1 D1)
+#else
   integer, parameter, public :: nbw = 3        ! max. half-bandwidth of B1/B2
+#endif
   real(rp), allocatable, public :: yg(:)       ! grid points y(1:ny), y(1) = -1, y(ny) = 1
   real(rp), allocatable, public :: a1(:,:),a2(:,:) ! (-1:1   ,ny)
   real(rp), allocatable, public :: b1(:,:),b2(:,:) ! (-nbw:nbw,ny)
@@ -33,6 +44,26 @@ module mod_compact
   real(rp), allocatable, public :: rxi(:)          ! 1/(dy/dxi): D1m = diag(rxi) D_xi (metric first derivative)
   real(rp), public :: ew1(6),ewn(6)                ! explicit one-sided 6-point d/dy at y = -1 (points 1..6)
                                                    ! and y = +1 (points ny-5..ny)
+  ! SBP 4-8 boundary closure (unit spacing): norm weights h(1:8), D rows 1..8, columns 1..12
+  real(rp), parameter :: sbp_h(8) = [ &
+    2.94890676177361477e-01_rp, &
+    1.52572062390145424e+00_rp, &
+    2.57452876972131595e-01_rp, &
+    1.79811370152010408e+00_rp, &
+    4.12708057738160272e-01_rp, &
+    1.27848462303000998e+00_rp, &
+    9.23295579800635369e-01_rp, &
+    1.00933386086012922e+00_rp ]
+  real(rp), parameter :: sbp_d(12,8) = reshape([ &
+    -1.69554360443487151e+00_rp, 2.28365780049358413e+00_rp, -1.82453400290539802e-01_rp, -5.81907184654250065e-01_rp, -1.03004461093917400e-02_rp, 1.98427134697384433e-01_rp, 4.08012371697819495e-02_rp, -5.26815368967546993e-02_rp, 6.14143270101202171e-13_rp, 1.90854920206655761e-12_rp, 1.04292446649211556e-11_rp, 1.20952288114054628e-11_rp, &
+    -4.41384472619382795e-01_rp, 0.00000000000000000e+00_rp, 1.69613117424176341e-01_rp, 3.50390955256822734e-01_rp, 1.74282126558882797e-02_rp, -8.16876185182807690e-02_rp, -4.88475008434450311e-02_rp, 3.44873066742427195e-02_rp, -1.27643987540687602e-12_rp, -2.07311078117834920e-12_rp, -1.22820971921669138e-11_rp, -1.43901464092476599e-11_rp, &
+    2.08985066375312500e-01_rp, -1.00516348615633166e+00_rp, 0.00000000000000000e+00_rp, 1.34630829158111509e+00_rp, -4.29774093090169174e-01_rp, -5.99761575269255665e-01_rp, 6.71697717351908419e-01_rp, -1.92291921261650012e-01_rp, 2.54929473135915557e-11_rp, 2.82531592260426449e-11_rp, 1.86797180684179791e-10_rp, 2.28532644511495571e-10_rp, &
+    9.54327877097475991e-02_rp, -2.97310846589914024e-01_rp, -1.92763640400477831e-01_rp, 0.00000000000000000e+00_rp, 2.00372431237829024e-01_rp, 2.82093267976086026e-01_rp, -8.56500624185360243e-02_rp, -2.17393741664853807e-03_rp, -6.10716244122524524e-12_rp, -4.97284393859034834e-12_rp, -3.75661664556353437e-11_rp, -4.94403932986037549e-11_rp, &
+    7.35993751799759229e-03_rp, -6.44295234567465042e-02_rp, 2.68098901001714129e-01_rp, -8.72995831460650296e-01_rp, 0.00000000000000000e+00_rp, 8.77523783760982501e-01_rp, -2.77154811227903974e-01_rp, 7.02511874017294341e-02_rp, -8.65364388704173773e-03_rp, 1.55360101596893363e-11_rp, 1.36059684221227069e-10_rp, 1.98327469813505541e-10_rp, &
+    -4.57684909687604211e-02_rp, 9.74845391533581268e-02_rp, 1.20776065874343350e-01_rp, -3.96747650395851748e-01_rp, -2.83273752293331571e-01_rp, 0.00000000000000000e+00_rp, 5.92613940537489947e-01_rp, -1.12088347391567186e-01_rp, 2.97971812904359312e-02_rp, -2.79348574853204284e-03_rp, -2.15896310227557743e-11_rp, -3.59929559564246135e-11_rp, &
+    -1.30314762477991182e-02_rp, 8.07191554832097230e-02_rp, -1.87297019038261736e-01_rp, 1.66803084667725143e-01_rp, 1.23886679777404904e-01_rp, -8.20590747909784701e-01_rp, 0.00000000000000000e+00_rp, 8.28733742150884245e-01_rp, -2.16615355227263634e-01_rp, 4.12600676633798832e-02_rp, -3.86813133538346787e-03_rp, 1.58895950110713456e-11_rp, &
+    1.53916306981991251e-02_rp, -5.21314077493314695e-02_rp, 4.90482983550383639e-02_rp, 3.87283812294954071e-03_rp, -2.87251148808779291e-02_rp, 1.41978025426438309e-01_rp, -7.58090291657802173e-01_rp, 0.00000000000000000e+00_rp, 7.92601963554506850e-01_rp, -1.98150490888735487e-01_rp, 3.77429506446594690e-02_rp, -3.53840162504355949e-03_rp ],[12,8])
+
 contains
   subroutine init_grid(ny,grid_type,alpha,grid_file)
     implicit none
@@ -71,18 +102,25 @@ contains
   end subroutine init_grid
   !
   subroutine init_compact(ny,order)
+    use mod_param, only: y_scheme
     implicit none
     integer, intent(in) :: ny,order
     integer :: i,j,l
     real(rp), allocatable :: z(:)
     real(rp) :: cmax
+    logical :: sbp
     !
+    sbp = (y_scheme == 'sbp48')
     allocate(a1(-1:1,ny),a2(-1:1,ny),b1(-nbw:nbw,ny),b2(-nbw:nbw,ny))
     a1(:,:) = 0._rp; a2(:,:) = 0._rp; b1(:,:) = 0._rp; b2(:,:) = 0._rp
-    do i=1,ny
-      call row_coeffs(i,ny,order,1,a1(:,i),b1(:,i))
-      call row_coeffs(i,ny,order,2,a2(:,i),b2(:,i))
-    end do
+    if(sbp) then
+      call init_sbp48(ny)
+    else
+      do i=1,ny
+        call row_coeffs(i,ny,order,1,a1(:,i),b1(:,i))
+        call row_coeffs(i,ny,order,2,a2(:,i),b2(:,i))
+      end do
+    end if
     kl1 = 0; ku1 = 0; kl2 = 0; ku2 = 0
     do i=1,ny
       do l=-nbw,nbw
@@ -135,8 +173,18 @@ contains
     end do
     nc1 = max(nc1,2); ncn = max(ncn,2)
     !
-    call init_metric_derivative(ny,order)
-    call init_quadrature(ny,order)
+    if(sbp) then
+      ! D1m = D1 (already mapped and skew-adjoint up to the boundary term); quadrature = SBP norm
+      allocate(b1m,source=b1)
+      allocate(t1mw(ny),t1md(ny),t1mu(ny),rxi(ny),wq(ny))
+      t1mw(:) = 0._rp; t1md(:) = 1._rp/a1(0,:); t1mu(:) = 0._rp
+      rxi(:) = 1._rp
+      wq(:) = 2._rp/(ny-1)*a1(0,:)
+      wq(1:8) = wq(1:8)*sbp_h(:); wq(ny:ny-7:-1) = wq(ny:ny-7:-1)*sbp_h(:)
+    else
+      call init_metric_derivative(ny,order)
+      call init_quadrature(ny,order)
+    end if
     allocate(dyc(ny))
     dyc(1)  = yg(2)-yg(1)
     dyc(ny) = yg(ny)-yg(ny-1)
@@ -146,12 +194,57 @@ contains
     lam2max = spectral_radius_d2(ny)
     call wall_derivative(yg(1:6),yg(1),ew1)
     call wall_derivative(yg(ny-5:ny),yg(ny),ewn)
-    if(order == 4) then
+    if(sbp) then
+      kappa1 = 1.74_rp                             ! spectral radius of D_xi: 1.73
+    else if(order == 4) then
       kappa1 = 1.74_rp
     else
       kappa1 = 2.0_rp
     end if
   end subroutine init_compact
+  !
+  subroutine init_sbp48(ny)
+    !
+    ! A1 = A2 = diag(y_xi), B1 = D_xi, B2 = D_xi diag(1/y_xi) D_xi (see the header)
+    !
+    implicit none
+    integer, intent(in) :: ny
+      real(rp), parameter :: cc(4) = [4._rp/5, -1._rp/5, 4._rp/105, -1._rp/280]
+    real(rp) :: dx(-nbw:nbw,ny),yxi(ny),dxi
+    integer :: i,j,m,o
+#ifndef _SBP48
+    call abort_run("y_scheme = 'sbp48' needs the wide-band build: make SBP=1")
+#else
+    dx(:,:) = 0._rp
+    do i=9,ny-8
+      do o=1,4
+        dx(o,i) = cc(o); dx(-o,i) = -cc(o)
+      end do
+    end do
+    do i=1,8
+      do j=1,12
+        dx(j-i,i) = sbp_d(j,i)
+        dx(i-j,ny+1-i) = -sbp_d(j,i)          ! D(n+1-i,n+1-j) = -D(i,j)
+      end do
+    end do
+    dxi = 2._rp/(ny-1)
+    dx(:,:) = dx(:,:)/dxi
+    call mat_band_apply(ny,nbw,dx,yg,yxi)
+    if(any(yxi <= 0._rp)) call abort_run('grid is not monotonic: dy/dxi <= 0')
+    a1(0,:) = yxi(:); a2(0,:) = yxi(:)
+    b1(:,:) = dx(:,:)
+    do i=1,ny
+      do m=max(1,i-nbw),min(ny,i+nbw)
+        if(abs(m-i) > 11 .or. dx(m-i,i) == 0._rp) cycle
+        do j=max(1,m-11),min(ny,m+11)
+          if(abs(j-i) > nbw) cycle
+          if(abs(j-m) > nbw) cycle
+          b2(j-i,i) = b2(j-i,i) + dx(m-i,i)*dx(j-m,m)/yxi(m)
+        end do
+      end do
+    end do
+#endif
+  end subroutine init_sbp48
   !
   subroutine init_metric_derivative(ny,order)
     !

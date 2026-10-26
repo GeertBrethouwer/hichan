@@ -237,6 +237,53 @@ buoyancy force.
   * Restart files hold u, v, w and the scalars, so a run can be restarted with either method; φ and ω are
     rebuilt from the velocity.
 
+### SBP 4-8 option (`y_scheme = 'sbp48'`, prototype)
+
+This option replaces the compact wall-normal derivatives by the diagonal-norm summation-by-parts operator of order
+8 in the interior and 4 at the walls (Mattsson & Nordström, J. Comput. Phys. 199, 2004). It needs the wide-band
+build `make SBP=1` (also for the GPU build).
+
+* **Operators:** D1 = diag(1/y_ξ) D_ξ, with D_ξ the SBP operator on the uniform grid in ξ and y_ξ = D_ξ y. In
+  the notation of the code, A1 = diag(y_ξ) and B1 = D_ξ. The second derivative is D2 = D1 D1, so A2 = diag(y_ξ)
+  and B2 = D_ξ diag(1/y_ξ) D_ξ, with up to 15 diagonals near the walls. The rest of the solver is unchanged:
+  the same banded solves, influence matrix and RK3.
+* **Properties:** with the norm H = diag(h_i y_ξ,i) dξ, D1 is SBP on any monotone grid. Then:
+  * the pressure does no work;
+  * the rotational form conserves the total kinetic energy without viscosity;
+  * the skew-symmetric scalar form (`scal_form = 'skew'`, which uses this D1) conserves ∫s².
+
+  Since D2 = D1 D1, the viscous term is dissipative in the same norm. With implicit viscous terms, D1 and D2
+  commute and B.2 converges in one iteration.
+* **Accuracy:** 8th order in the interior, 4th order in the four rows next to each wall. On a mapped grid
+  the operator is exact for polynomials in ξ, not in y, so a laminar profile has a small error on coarse
+  grids: 2e-3 at Ny = 33, 4e-5 at Ny = 65 and 1e-6 at Ny = 129 (vertical channel, α_s = 2).
+* **Limitations:**
+  * a prototype;
+  * not with `ns_method = 'vv'`;
+  * ny ≥ 25;
+  * the wide band costs memory and time (see *Cost*).
+* **Cost:**
+  * Memory: the LU work array grows from 4 to 16 reals per spectral point, about +96 B per grid point
+    against roughly 330 B for the rest of the code (+30%, also with `y_scheme = 'compact'` in this build).
+  * Time: on one CPU core (32×129×32, explicit velocity, one scalar with θ = 0.5) a step costs
+    1.3× the default with `'compact'` in the SBP build, and 2.5× with `'sbp48'` (velocity solve 3×, scalar
+    solve 5×).
+  * The banded LU runs over the maximum band width in every row. A row-dependent band would bring most of
+    this back, since the interior band is ±4 (D1) and ±8 (D2).
+
+| test | compact D1-6 | SBP 4-8 |
+|---|---|---|
+| TS wave (Re 5000, α = 1.12, grid α_s = 4), rel. error of the decay rate vs. Orr–Sommerfeld, Ny = 65 / 129 | advective 3.9e-5 / 7.8e-6, rotational 5.0e-4 / 1.5e-5, divergence 4.6e-5 / 7.3e-6 | advective 9.3e-6 / 3.5e-7, rotational 1.25e-4 / 7.9e-8, divergence 8.8e-5 / 2.2e-8 |
+| `scalar_check`, advective and skew | exact | exact |
+| Inviscid channel (16×33×16, Re = 10⁸, noise 0.3), rotational form, total kinetic energy | grows 750×, diverges at t = 29 | decreases by 0.12% up to t = 40 |
+| Same, advective form | diverges at t ≈ 3 | diverges at t ≈ 4 |
+| Vertical convection, Re 400, Pr 0.7, Ri 1, no pressure gradient, rotational, advective scalar, grid α_s = 4 (16×33×16 / 32×33×32) | diverges at t = 8.8 / 9.9 | diverges at t = 9.2 / stable to t = 100 |
+| Same with `scal_form = 'skew'` | stable to t = 100 on both grids | stable to t = 100 on both grids |
+| Same, `nl_form = 'advective'`, skew scalar, α_s = 2 | diverges at t ≈ 8.1 (advective scalar) | diverges at t ≈ 7.0 |
+
+The SBP build with `y_scheme = 'compact'` gives the same `log.dat` as the default build, bit for bit. The
+`sbp48` runs give the same results on 1 and 4 ranks with bounds checking, and the OpenACC sources compile.
+
 ### Differences from the paper (all deliberate)
 
 * The paper's nested superposition (B.9 and Eq. 23) is merged into one 6×6 influence matrix per wavenumber.
@@ -370,7 +417,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 
 | namelist | contents |
 |---|---|
-| `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `dealias` |
+| `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `y_scheme` (`compact`/`sbp48`, see *SBP 4-8 option*), `dealias` |
 | `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`/`divergence`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
 | `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |

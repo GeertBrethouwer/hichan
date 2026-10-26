@@ -7,6 +7,8 @@
 #   make GPU=1 CUDECOMP=1      GPU build with cuDecomp transposes (recommended)
 #   make ... CUFFT_AUTO_WORK=1 only if the shared cuFFT work area causes problems: every cuFFT
 #                              plan then allocates its own work area (more GPU memory)
+#   make ... SBP=1             wider band storage for y_scheme = 'sbp48' (SBP 4-8 prototype);
+#                              more memory and slower banded solves, also for the compact schemes
 #   make ... DIEZDECOMP=1      add the diezDecomp transposes (tools/get_diezdecomp.sh first);
 #                              CPU or GPU, can be combined with CUDECOMP=1. The library is chosen
 #                              at run time with transpose_lib in &parallel
@@ -25,6 +27,7 @@ endif
 GPU       ?= 0
 CUDECOMP  ?= 0
 DIEZDECOMP ?= 0
+SBP       ?= 0
 DIEZDECOMP_DIR ?= $(CURDIR)/dependencies/diezDecomp
 DEBUG     ?= 0
 GPU_CC    ?= cc90
@@ -47,6 +50,9 @@ INCS    :=
 
 ifeq ($(strip $(CUFFT_AUTO_WORK)),1)
   DEFINES += -D_CUFFT_AUTO_WORK
+endif
+ifeq ($(strip $(SBP)),1)
+  DEFINES += -D_SBP48
 endif
 ifeq ($(strip $(DIEZDECOMP)),1)
   DEFINES += -D_USE_DIEZDECOMP

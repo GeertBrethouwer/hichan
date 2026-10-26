@@ -26,6 +26,9 @@
   grid_alpha = 3.0                     ! tanh stretching alpha_s: larger -> finer at the walls        [2.0]
   grid_file  = 'grid.in'               ! ny values of y in [-1,1], one per line (grid_type='file')    ['grid.in']
   fd_order   = 6                       ! compact scheme: 4 = (3-4-3), 6 = (3-5-6-5-3)                 [6]
+  y_scheme   = 'compact'               ! wall-normal derivatives: 'compact' (fd_order) or 'sbp48':   ['compact']
+                                       !   summation-by-parts 4-8, energy-stable (prototype; build
+                                       !   with make SBP=1; needs ny >= 25, not with ns_method='vv')
   dealias    = .true.                  ! 3/2-rule dealiasing of the nonlinear terms in x and z        [.true.]
 /
 

@@ -153,7 +153,9 @@ contains
       rr = x(i,j,r)
       do l=max(1,r-kl),r-1
         o = l-r
-        if(row(o) /= 0._rp) then
+        ! tiny multipliers are skipped: in the wide SBP band the eliminations of the lower
+        ! entries decay into denormal numbers, which are ~100x slower on x86 CPUs
+        if(abs(row(o)) > 1.e-200_rp) then
           f = row(o)/uf(i,j,l,0)
           do q=1,ku
             if(o+q <= ku) row(o+q) = row(o+q) - f*uf(i,j,l,q)
