@@ -63,6 +63,7 @@ module mod_param
   character(len=256) :: data_dir = 'data'
   integer  :: iout_log = 10, iout_stats = 10, iout_save_stats = 1000, iout_restart = 5000, iout_field = 0
   real(rp) :: tstats_start = 0._rp
+  logical  :: stats_restart = .true. ! 'restart': continue the averages of <restart_file>.stats (if present)
   integer  :: mode_log_kx = -1, mode_log_kz = 0 ! log the amplitude of one Fourier mode (e.g. for TS waves)
   logical  :: timing = .false.       ! timers: report at the end, time per step in timing_steps.dat
   logical  :: timing_sync = .true.   ! timers wait for the GPU (exact attribution, small overhead)
@@ -123,7 +124,7 @@ contains
     namelist /physics/ re,forcing,ubulk,dpdx,ns_method,vv_neumann,nl_form,visc_theta,impl_maxit,impl_tol
     namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
-    namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
+    namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start,stats_restart, &
                       mode_log_kx,mode_log_kz,timing,timing_sync
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit,scal_form
     namelist /buoyancy/ gravity,ri
@@ -238,6 +239,24 @@ contains
       write(*,'(a)') ' ===================================================================================='
     end subroutine print_setup
   end subroutine read_input
+  !
+  subroutine replace_file(tmpname,fname,ok)
+    !
+    ! atomically replaces fname by tmpname (POSIX rename): a file is never left half written
+    !
+    use, intrinsic :: iso_c_binding, only: c_int,c_char,c_null_char
+    implicit none
+    character(len=*), intent(in) :: tmpname,fname
+    logical, intent(out) :: ok
+    interface
+      function c_rename(oldname,newname) bind(C,name='rename') result(ires)
+        import :: c_int,c_char
+        character(kind=c_char), intent(in) :: oldname(*),newname(*)
+        integer(c_int) :: ires
+      end function c_rename
+    end interface
+    ok = (c_rename(trim(tmpname)//c_null_char,trim(fname)//c_null_char) == 0)
+  end subroutine replace_file
   !
   subroutine abort_run(msg)
     implicit none

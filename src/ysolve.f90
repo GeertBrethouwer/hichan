@@ -1209,7 +1209,7 @@ contains
     integer :: r,l
     dpdx_eff = 0._rp
     if(.not.mean_owner) return
-    !$acc serial default(present) private(h)
+    !$acc serial default(present) private(h) async(1)
     do l=1,4
       h(l) = hinv_i(l,i00,j00,q)
     end do
@@ -1568,7 +1568,7 @@ contains
     dpdx_eff = 0._rp
     if(.not.mean_owner) return
     zero = (0._rp,0._rp)
-    !$acc serial default(present) private(h)
+    !$acc serial default(present) private(h) async(1)
     do l=1,4
       h(l) = hinv_c(l,i00,j00,q)
     end do

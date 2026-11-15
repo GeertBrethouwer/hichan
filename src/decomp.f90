@@ -483,11 +483,13 @@ contains
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeXToY(ch,gd_a,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'XToY')
         call to_dp(size(ya),cw4b,ya)
       else
         !$acc host_data use_device(xa,ya,work)
         istat = cudecompTransposeXToY(ch,gd_a,xa,ya,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'XToY')
       end if
 #endif
 #if defined(_USE_DIEZDECOMP)
@@ -592,11 +594,13 @@ contains
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeYToX(ch,gd_a,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'YToX')
         call to_dp(size(xa),cw4b,xa)
       else
         !$acc host_data use_device(xa,ya,work)
         istat = cudecompTransposeYToX(ch,gd_a,ya,xa,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'YToX')
       end if
 #endif
 #if defined(_USE_DIEZDECOMP)
@@ -701,11 +705,13 @@ contains
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeYToZ(ch,gd_b,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'YToZ')
         call to_dp(size(zb),cw4b,zb)
       else
         !$acc host_data use_device(yb,zb,work)
         istat = cudecompTransposeYToZ(ch,gd_b,yb,zb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'YToZ')
       end if
 #endif
 #if defined(_USE_DIEZDECOMP)
@@ -810,11 +816,13 @@ contains
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeZToY(ch,gd_b,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'ZToY')
         call to_dp(size(yb),cw4b,yb)
       else
         !$acc host_data use_device(yb,zb,work)
         istat = cudecompTransposeZToY(ch,gd_b,zb,yb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
         !$acc end host_data
+        call cud_check(istat,'ZToY')
       end if
 #endif
 #if defined(_USE_DIEZDECOMP)
@@ -915,6 +923,13 @@ contains
   end subroutine alltoallv4
   !
 #if defined(_USE_CUDECOMP)
+  subroutine cud_check(istat,what)
+    implicit none
+    integer, intent(in) :: istat
+    character(len=*), intent(in) :: what
+    if(istat /= CUDECOMP_RESULT_SUCCESS) call abort_run('cuDecomp transpose '//what//' failed')
+  end subroutine cud_check
+  !
   subroutine to_sp(n,a,b)
     ! b = a rounded to single precision
     implicit none

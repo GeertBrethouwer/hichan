@@ -26,7 +26,7 @@ program hichan
   implicit none
   integer :: ierr,istep,istep0,ilog,n,nf
   real(rp) :: time,dtcur,divm,t0,t1,tstep,twall0
-  logical :: is_done,is_stop
+  logical :: is_done,is_stop,is_ok
   character(len=8), allocatable :: names(:)
   character(len=4) :: cs
   !
@@ -41,7 +41,7 @@ program hichan
   call alloc_fields
   call init_fft(up)
   call init_ysolve
-  if(visc_theta > 0._rp) call init_implicit
+  if(visc_theta > 0._rp .and. ns_method /= 'vv') call init_implicit
   if(ns_method == 'vv') call init_vv
   call init_rk
   call init_stats
@@ -68,6 +68,8 @@ program hichan
     call read_restart(trim(restart_file),time,istep,dtcur,u,v,w,s)
     if(reset_time) then
       time = 0._rp; istep = 0
+    else if(stats_restart) then
+      call read_stats_state(trim(restart_file))
     end if
   else
     call init_fields(u,v,w,s)
@@ -128,8 +130,11 @@ program hichan
     call toc(tm_stats)
     call tic(tm_io)
     if(iout_restart > 0) then
-      if(mod(istep,iout_restart) == 0 .or. is_done) &
-        call write_restart(trim(data_dir)//'/restart',time,istep,dtcur,u,v,w,s)
+      if(mod(istep,iout_restart) == 0 .or. is_done) then
+        call write_restart(trim(data_dir)//'/restart',time,istep,dtcur,u,v,w,s,is_ok)
+        ! the sums of the statistics belong to this restart file: only written together with it
+        if(is_ok) call write_stats_state(trim(data_dir)//'/restart')
+      end if
     end if
     if(iout_field > 0) then
       if(mod(istep,iout_field) == 0) call output_fields()
@@ -170,7 +175,7 @@ contains
     b(2) = ph*(4+ng)
     b(3) = sp*5 + 8_i8*36*nkx*nkz
     b(4) = 0
-    if(visc_theta > 0._rp) b(4) = b(4) + sp*3 + 8_i8*120*nkx*nkz
+    if(visc_theta > 0._rp .and. ns_method /= 'vv') b(4) = b(4) + sp*3 + 8_i8*120*nkx*nkz
     if(ns_method == 'vv')  b(4) = b(4) + sp*4 + 8_i8*28*nkx*nkz
     b(5) = 16_i8*(max(int(mx/2+1,i8)*nzA*nyA,int(mz,i8)*nyA*nkx) + max(int(nxh,i8)*nzA*nyA,int(nz,i8)*nyA*nkx))
     b(6) = tr_work_bytes
@@ -219,7 +224,7 @@ contains
   subroutine log_line_stdout
     write(*,'(a,i9,a,es12.5,a,es10.3,a,es12.5,a,es10.3)',advance='no') ' step ',istep,'  t = ',time, &
                                                          '  dt = ',dtcur,'  dpdx = ',dpdx_applied,'  div = ',divm
-    if(visc_theta > 0._rp) write(*,'(a,i3,a,es9.2)',advance='no') '  impl. it. ',impl_nit,' dv ',impl_res
+    if(visc_theta > 0._rp .and. ns_method /= 'vv') write(*,'(a,i3,a,es9.2)',advance='no') '  impl. it. ',impl_nit,' dv ',impl_res
     write(*,*)
   end subroutine log_line_stdout
   !
