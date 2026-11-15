@@ -95,6 +95,8 @@ module mod_param
                                                  ! (rounded to single precision; computation stays double)
   integer :: cudecomp_t_backend = 0        ! 0 -> autotune, otherwise CUDECOMP_TRANSPOSE_COMM_* value
   logical :: cudecomp_enable_nccl = .true., cudecomp_enable_nvshmem = .false.
+  logical :: fft_2d = .false.              ! slabs in y (p1 = 1): one batched 2D FFT in x and z instead of two
+                                           ! 1D FFTs and the local transpose between them
   !
   ! derived quantities
   !
@@ -128,7 +130,8 @@ contains
                       mode_log_kx,mode_log_kz,timing,timing_sync
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit,scal_form
     namelist /buoyancy/ gravity,ri
-    namelist /parallel/ pdims,transpose_lib,transpose_prec,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
+    namelist /parallel/ pdims,transpose_lib,transpose_prec,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem, &
+                        fft_2d
     !
     open(newunit=iunit,file='input.nml',status='old',action='read',iostat=ios)
     if(ios /= 0) call abort_run('cannot open input.nml')

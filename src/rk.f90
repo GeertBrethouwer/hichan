@@ -69,6 +69,29 @@ contains
     end do
   end subroutine spec_axpy
   !
+  subroutine spec_source(f,g,qc,qu)
+    ! g = qc + qu*f (qc in the mean mode)
+    implicit none
+    complex(rp), intent(in)  :: f(nkx,nkz,ny)
+    complex(rp), intent(out) :: g(nkx,nkz,ny)
+    real(rp), intent(in) :: qc,qu
+    integer :: i,j,k
+    !$acc parallel loop collapse(3) default(present) async(1)
+    do k=1,ny
+      do j=1,nkz
+        do i=1,nkx
+          g(i,j,k) = qu*f(i,j,k)
+        end do
+      end do
+    end do
+    if(mean_owner .and. qc /= 0._rp) then
+      !$acc parallel loop default(present) async(1)
+      do k=1,ny
+        g(i00,j00,k) = g(i00,j00,k) + qc
+      end do
+    end if
+  end subroutine spec_source
+  !
   subroutine phys_prod(a,b,c,fac,accum)
     ! c = fac*a*b (accum = .false.) or c = c + fac*a*b
     implicit none
@@ -185,25 +208,24 @@ contains
       fa = 1._rp
     end select
     do n=1,nscal
+      qc = ssrc_const(n); qu = ssrc_u(n)/ubulk
       if(fa > 0._rp) then
         call advect(s(:,:,:,n),-fa,skew)
-      else
-        !$acc kernels default(present) async(1)
-        ap(:,:,:) = 0._rp
-        !$acc end kernels
-      end if
-      qc = ssrc_const(n); qu = ssrc_u(n)/ubulk
-      if(qc /= 0._rp .or. qu /= 0._rp) then
-        !$acc parallel loop collapse(3) default(present) async(1)
-        do k=1,nyA
-          do j=1,nzA
-            do i=1,mx
-              ap(i,j,k) = ap(i,j,k) + qc + qu*up(i,j,k)
+        if(qc /= 0._rp .or. qu /= 0._rp) then
+          !$acc parallel loop collapse(3) default(present) async(1)
+          do k=1,nyA
+            do j=1,nzA
+              do i=1,mx
+                ap(i,j,k) = ap(i,j,k) + qc + qu*up(i,j,k)
+              end do
             end do
           end do
-        end do
+        end if
+        call fwd_fft(ap,ns(:,:,:,n))
+      else
+        ! divergence form: no advective part to transform; the (linear) sources are set in spectral space
+        call spec_source(u,ns(:,:,:,n),qc,qu)
       end if
-      call fwd_fft(ap,ns(:,:,:,n))
       if(fa < 1._rp) call add_flux_div(s(:,:,:,n),ns(:,:,:,n),fa-1._rp,skew)
       if(scal_theta(n) == 0._rp) call add_lap(s(:,:,:,n),ns(:,:,:,n),diff(n),tmp1)
     end do
@@ -468,7 +490,7 @@ contains
           c = 0._rp
         end if
         call tic(tm_ssolve)
-        call scalar_solve(s(:,:,:,n),c,sbc_bot(n),sbc_top(n),sval_bot(n),sval_top(n))
+        call scalar_solve(s(:,:,:,n),c,sbc_bot(n),sbc_top(n),sval_bot(n),sval_top(n),tmp1)
         call toc(tm_ssolve)
       end do
     end do

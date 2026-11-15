@@ -68,6 +68,11 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
   most of the time per step, so this can be the largest single gain. Accuracy: see the README. On one CPU node
   (where the transposes are mostly local memory copies) the gain was only 8%; on GPUs connected by the network,
   measure it with `timing = .true.`.
+- **`fft_2d = .true.`** (only with `pdims = 1, P`, slabs in y): x and z are then both local before the
+  transpose to wall-normal pencils, and one batched 2D FFT replaces the two 1D FFTs, the local transpose between
+  them and one copy. The results agree with the 1D path to round-off (CPU test). It is off by default because it
+  has not been run on a GPU: check it once with `examples/ts_wave`, then compare the time per step with
+  `timing = .true.`.
 - **Slab decompositions** (one of `p1`, `p2` equal to 1) halve the communication: one of the two transposes of
   every FFT becomes a local copy. That copy is done without MPI by cuDecomp and diezDecomp, and through
   MPI_Alltoallv on a one-rank communicator by `'mpi'`.

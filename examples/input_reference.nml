@@ -27,6 +27,9 @@
   grid_file  = 'grid.in'               ! ny values of y in [-1,1], one per line (grid_type='file')    ['grid.in']
   fd_order   = 6                       ! compact scheme: 4 = (3-4-3), 6 = (3-5-6-5-3)                 [6]
   dealias    = .true.                  ! 3/2-rule dealiasing of the nonlinear terms in x and z        [.true.]
+  fft_2d                  = .false.    ! slabs in y (pdims = 1, P): one batched 2D FFT in x and z      [.false.]
+                                       !   instead of two 1D FFTs and the local transpose between them;
+                                       !   compare with timing = .true. (see PERF.md)
 /
 
 !------------------------------------------------------------------------------------------------------
