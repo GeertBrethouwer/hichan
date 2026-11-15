@@ -133,7 +133,10 @@ The constant-flow-rate correction uses the implicit response `L⁻¹·1` of the 
 Dirichlet (`s = g`) or Neumann (`D1 s = g`) walls, where `c = θ β_q Δt/(Re Pr)`. Premultiplying by `A2` couples
 the unknown wall values of the operator into the first interior rows. This is the boundary error that the paper
 corrects with σ, and it is corrected here by superposition in the same way. No iteration is needed, because there
-is no pressure coupling. The explicit part `(1−θ)` and the right-hand side follow Eq. (13).
+is no pressure coupling. The banded matrix and the right-hand sides of the homogeneous problems are real, so one
+complex banded solve gives two homogeneous solutions: a scalar costs two banded solves per wavenumber pair and
+substep with Dirichlet walls, three with a Neumann wall. With explicit diffusion (θ = 0) only the wall values
+are set. The explicit part `(1−θ)` and the right-hand side follow Eq. (13).
 
 **Nonlinear terms.** Two forms are available:
 
@@ -361,7 +364,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `stats_restart`, `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
-| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
+| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem`, `fft_2d` |
 
 ## Output (in `data_dir`)
 
