@@ -11,7 +11,8 @@ module mod_stats
   use mod_compact, only: yg
   implicit none
   private
-  public :: init_stats,accumulate_stats,write_stats,log_line,mode_energy,profile_mean
+  public :: init_stats,accumulate_stats,write_stats,log_line,mode_energy,profile_mean, &
+            write_stats_state,read_stats_state
   integer :: nq
   real(rp), allocatable :: ssum(:,:),prof(:),pmean(:)
   real(rp) :: tsum = 0._rp
@@ -149,6 +150,68 @@ contains
     end do
     close(iunit)
   end subroutine write_stats
+  !
+  subroutine write_stats_state(fname)
+    !
+    ! accumulated sums of the statistics -> <fname>.stats, written together with the restart file,
+    ! so that a restarted run continues the same time average (rank 0 holds the sums)
+    !
+    implicit none
+    character(len=*), intent(in) :: fname
+    integer :: iunit,ios,ios2
+    logical :: ok
+    if(myid /= 0) return
+    open(newunit=iunit,file=trim(fname)//'.stats.tmp',access='stream',form='unformatted',status='replace', &
+         action='write',iostat=ios)
+    if(ios == 0) write(iunit,iostat=ios) ny,nq,nsamp,tsum,ssum
+    if(ios == 0) then
+      close(iunit,iostat=ios)
+    else
+      close(iunit,iostat=ios2)
+    end if
+    ok = (ios == 0)
+    if(ok) call replace_file(trim(fname)//'.stats.tmp',trim(fname)//'.stats',ok)
+    if(.not.ok) write(*,'(a)') ' WARNING: could not write '//trim(fname)//'.stats (statistics state); '// &
+                               'a previous file, if any, was kept'
+  end subroutine write_stats_state
+  !
+  subroutine read_stats_state(fname)
+    !
+    ! continue the time average of a previous run (<fname>.stats, see write_stats_state)
+    !
+    implicit none
+    character(len=*), intent(in) :: fname
+    integer :: iunit,ios,nyr,nqr,nsr
+    real(rp) :: tsr
+    logical :: ex
+    if(myid /= 0) return
+    inquire(file=trim(fname)//'.stats',exist=ex)
+    if(.not.ex) then
+      write(*,'(a)') ' statistics: no '//trim(fname)//'.stats, the averaging starts anew'
+      return
+    end if
+    open(newunit=iunit,file=trim(fname)//'.stats',access='stream',form='unformatted',status='old', &
+         action='read',iostat=ios)
+    if(ios == 0) read(iunit,iostat=ios) nyr,nqr,nsr,tsr
+    if(ios == 0) then
+      if(nyr /= ny .or. nqr /= nq) then
+        write(*,'(a)') ' statistics: '//trim(fname)//'.stats has a different ny or number of scalars, '// &
+                       'the averaging starts anew'
+        close(iunit)
+        return
+      end if
+      read(iunit,iostat=ios) ssum
+    end if
+    if(ios /= 0) then
+      write(*,'(a)') ' WARNING: could not read '//trim(fname)//'.stats, the averaging starts anew'
+      ssum(:,:) = 0._rp; tsum = 0._rp; nsamp = 0
+    else
+      tsum = tsr; nsamp = nsr
+      write(*,'(a,i0,a,es12.5)') ' statistics: continuing the average of '//trim(fname)//'.stats, samples = ', &
+                                 nsamp,', averaging time = ',tsum
+    end if
+    close(iunit,iostat=ios)
+  end subroutine read_stats_state
   !
   real(rp) function mode_energy(u,v,w,ikx,ikz)
     ! integral of |u|^2+|v|^2+|w|^2 of Fourier mode (ikx,ikz) (integers, ikx >= 0)

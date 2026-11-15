@@ -109,6 +109,8 @@
   iout_field      = 0                  ! write 3D physical fields (+ .xmf for ParaView) every ...     [0]
                                        !   steps (0: never)
   tstats_start    = 300.               ! start averaging statistics at this time                      [0.0]
+  stats_restart   = .true.             ! 'restart': continue the time average stored with the         [.true.]
+                                       !   restart file (<restart_file>.stats); .false.: start anew
   mode_log_kx     = -1                 ! log the energy of Fourier mode (mode_log_kx, mode_log_kz)    [-1]
   mode_log_kz     = 0                  !   in log.dat (-1: off)                                       [0]
   timing          = .false.            ! timers: report of the time per part of the code at the end   [.false.]
