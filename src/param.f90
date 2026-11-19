@@ -15,7 +15,8 @@ module mod_param
   character(len=16)  :: grid_type = 'tanh' ! 'tanh' (Orlandi stretching), 'uniform' or 'file'
   real(rp) :: grid_alpha = 2._rp           ! stretching parameter alpha_s of Eq. (41)
   character(len=256) :: grid_file = 'grid.in'
-  integer  :: fd_order = 6                 ! 4 -> (3-4-3), 6 -> (3-5-6-5-3) compact schemes
+  integer  :: fd_order = 6                 ! 4 -> (3-4-3), 6 -> (3-5-6-5-3) compact schemes, 8 -> 8th order
+                                           !   (tridiagonal, explicit wall rows; as FDCHAN)
   logical  :: dealias = .true.             ! 3/2 rule in x and z
   !
   ! &physics
@@ -150,7 +151,7 @@ contains
     !
     if(mod(nx,2) /= 0 .or. mod(nz,2) /= 0) call abort_run('nx and nz must be even')
     if(ny < 9) call abort_run('ny must be at least 9')
-    if(all(fd_order /= [4,6])) call abort_run('fd_order must be 4 or 6')
+    if(all(fd_order /= [4,6,8])) call abort_run('fd_order must be 4, 6 or 8')
     if(dt <= 0._rp) call abort_run('dt must be > 0')
     if(ls_nmin < 1 .or. ls_nmax < ls_nmin) call abort_run('&init: 1 <= ls_nmin <= ls_nmax required')
     if(dt_growth < 1._rp) call abort_run('dt_growth must be >= 1')

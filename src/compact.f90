@@ -7,6 +7,8 @@
 ! exactness for polynomials of the highest possible degree. Schemes:
 !   fd_order = 4 : (3-4-3)       tridiagonal LHS, 3rd-order boundary closure
 !   fd_order = 6 : (3-5-6-5-3)   tridiagonal LHS, 3rd/5th-order closures
+!   fd_order = 8 : tridiagonal LHS with 7-point RHS (8th order, the scheme of FDCHAN): explicit one-sided wall
+!                  rows (5 points for D1, 6 for D2), tridiagonal rows 2-3 with 4-point RHS (offsets -1..2)
 ! A1 and A2 are tridiagonal; B1 and B2 are banded with offsets in [-3,3].
 !
 module mod_compact
@@ -15,7 +17,7 @@ module mod_compact
   implicit none
   private
   public :: init_grid,init_compact,mat_band_apply
-  integer, parameter, public :: nbw = 3        ! max. half-bandwidth of B1/B2
+  integer, parameter, public :: nbw = 5        ! max. half-bandwidth of B1/B2 (3 for orders 4 and 6, 5 for order 8)
   real(rp), allocatable, public :: yg(:)       ! grid points y(1:ny), y(1) = -1, y(ny) = 1
   real(rp), allocatable, public :: a1(:,:),a2(:,:) ! (-1:1   ,ny)
   real(rp), allocatable, public :: b1(:,:),b2(:,:) ! (-nbw:nbw,ny)
@@ -26,6 +28,7 @@ module mod_compact
   real(rp), allocatable, public :: wq(:)           ! quadrature weights, int_{-1}^{1} f dy = sum wq*f
   real(rp), allocatable, public :: dyc(:)          ! local minimum grid spacing (for the CFL condition)
   integer , public :: kl1,ku1,kl2,ku2              ! actual bandwidths of B1 and B2
+  integer , public :: kb1,kb2                      ! max(kl1,ku1), max(kl2,ku2): loop bounds of B1 f, B2 f
   real(rp), public :: lam2max                      ! spectral radius of D2 with Dirichlet BCs
   real(rp), public :: kappa1                       ! max. modified wavenumber of D1 (uniform grid)
   real(rp), allocatable, public :: b1m(:,:)        ! (-nbw:nbw,ny) compact d/dxi on the uniform grid xi
@@ -94,6 +97,7 @@ contains
         end if
       end do
     end do
+    kb1 = max(kl1,ku1); kb2 = max(kl2,ku2)
     !
     ! Thomas factorisation of the (k-independent) tridiagonal A1 and A2
     !
@@ -146,11 +150,14 @@ contains
     lam2max = spectral_radius_d2(ny)
     call wall_derivative(yg(1:6),yg(1),ew1)
     call wall_derivative(yg(ny-5:ny),yg(ny),ewn)
-    if(order == 4) then
+    select case(order)
+    case(4)
       kappa1 = 1.74_rp
-    else
+    case(6)
       kappa1 = 2.0_rp
-    end if
+    case default
+      kappa1 = 2.14_rp   ! max of k'h = (a sin w + b/2 sin 2w + c/3 sin 3w)/(1 + 3/4 cos w): 2.1334
+    end select
   end subroutine init_compact
   !
   subroutine init_metric_derivative(ny,order)
@@ -220,6 +227,28 @@ contains
     integer, intent(out) :: nl,lo(3),nr,ro(7)
     integer :: k
     lo(:) = 0; ro(:) = 0
+    if(order == 8) then
+      if(i == 1 .or. i == ny) then
+        ! explicit one-sided wall row
+        nl = 1; lo(1) = 0
+        nr = 4+der
+        if(i == 1) then
+          ro(1:nr) = [(k,k=0,nr-1)]
+        else
+          ro(1:nr) = [(k,k=-(nr-1),0)]
+        end if
+      else if(i <= 3) then
+        nl = 3; lo(1:3) = [-1,0,1]
+        nr = 4; ro(1:4) = [-1,0,1,2]
+      else if(i >= ny-2) then
+        nl = 3; lo(1:3) = [-1,0,1]
+        nr = 4; ro(1:4) = [-2,-1,0,1]
+      else
+        nl = 3; lo(1:3) = [-1,0,1]
+        nr = 7; ro(1:7) = [(k,k=-3,3)]
+      end if
+      return
+    end if
     if(i == 1) then
       nl = 2; lo(1:2) = [0,1]
       if(der == 1) then
