@@ -33,6 +33,8 @@ module mod_param
   real(rp) :: visc_theta = 0._rp          ! theta of the viscous term (0: explicit, Appendix B.1; >0: implicit, B.2)
   integer  :: impl_maxit = 10              ! max. iterations of the implicit pressure/velocity coupling (B.2)
   real(rp) :: impl_tol = 1.e-12_rp         ! convergence: max|v^{m+1}-v^m| < impl_tol*max|v|
+  logical  :: pres_lu_stored = .true.      ! factorise the pressure matrices B1 +- k A1 once at start-up (14 reals
+                                           !   per spectral point); .false.: factorise them in every pressure step
   character(len=16) :: nl_form = 'rotational' ! 'rotational' (energy conserving, 9 FFTs) or 'advective' (as in the paper, 15 FFTs)
   !
   ! &time
@@ -120,7 +122,7 @@ contains
     integer, intent(in) :: myid
     integer :: iunit,ios
     namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
-    namelist /physics/ re,forcing,ubulk,dpdx,ns_method,vv_neumann,nl_form,visc_theta,impl_maxit,impl_tol
+    namelist /physics/ re,forcing,ubulk,dpdx,ns_method,vv_neumann,nl_form,visc_theta,impl_maxit,impl_tol,pres_lu_stored
     namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
@@ -155,6 +157,7 @@ contains
     if(ls_nmin < 1 .or. ls_nmax < ls_nmin) call abort_run('&init: 1 <= ls_nmin <= ls_nmax required')
     if(dt_growth < 1._rp) call abort_run('dt_growth must be >= 1')
     if(all(ns_method /= ['im ','vv '])) call abort_run("ns_method must be 'im' or 'vv'")
+    if(ns_method == 'vv') pres_lu_stored = .false.  ! 'vv' has no pressure step: no stored pressure factors
     if(all(vv_neumann /= ['explicit','compact '])) call abort_run("vv_neumann must be 'explicit' or 'compact'")
     if(visc_theta < 0._rp .or. visc_theta > 1._rp) call abort_run('0 <= visc_theta <= 1 required')
     if(any(scal_theta(:) < 0._rp .or. scal_theta(:) > 1._rp)) call abort_run('0 <= scal_theta <= 1 required')
