@@ -17,7 +17,8 @@ HiCHAN solves the incompressible Navier–Stokes equations in a plane channel, t
   Mathematics 9 (2021) 756 (Kim–Moin–Moser formulation for φ = ∇²v and ω_y; SMR RK3 with implicit viscous
   terms, Eqs. 30–32), on the same compact finite differences, FFTs, decomposition, scalars and buoyancy. See
   *Velocity–vorticity option* below.
-* **Time:** low-storage 3-stage RK3 (Table 1 of the paper). The viscous terms are either explicit (Appendix B.1,
+* **Time:** low-storage 3-stage RK3 (Table 1 of the paper), or with `rk_stages = 4` the 4-stage third-order
+  scheme of the SIMSON user guide (Chevalier et al. 2007, Table 5.1; see PERF.md). The viscous terms are either explicit (Appendix B.1,
   `visc_theta = 0`, the default and the variant the paper recommends for channel flow, Sec. 6) or implicit with
   the θ-method (Appendix B.2, `visc_theta > 0`, e.g. 0.5 = Crank–Nicolson). Scalar diffusion uses the same
   θ-method (`scal_theta`, default 0.5), or explicit RK3 when θ = 0.

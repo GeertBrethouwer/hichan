@@ -72,6 +72,8 @@
                                        !   used for the internal-gravity-wave limit (active scalars)
   cfl_visc      = 1.5                  ! explicit-diffusion limit (RK3 stable up to 2.51); not used   [1.5]
                                        !   for terms treated with theta >= 1/2
+  rk_stages     = 3                    ! 3: Wray's RK3; 4: 4-stage RK3 of SIMSON (stable up to cfl    [3]
+                                       !   sqrt(8) = 2.83 and cfl_visc 2.79; 4/3 of the cost per step)
 /
 
 !------------------------------------------------------------------------------------------------------

@@ -21,6 +21,16 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 
 - **`cfl`:** RK3 is stable up to √3 ≈ 1.73. Going from 1.0 to 1.5 means a third fewer steps; around 1.5 still
   leaves some margin. `cfl_visc` (limit 2.51) can go up to about 2.
+- **`rk_stages = 4`** (the 4-stage third-order RK3 of SIMSON). Its limits are √8 = 2.83 for `cfl` and 2.79 for
+  `cfl_visc`, at 4/3 of the cost of a step.
+  - **When advection sets dt:** 2.83/4 = 0.71 per stage against 1.73/3 = 0.58, so about 20 % less work per unit
+    time. Use e.g. `cfl = 2.4`.
+  - **When explicit diffusion sets dt:** 2.79/4 = 0.70 against 2.51/3 = 0.84, so 17 % more work. Keep 3 stages
+    or use `visc_theta = 0.5`.
+  - **Accuracy:** its error at the same dt is much smaller (MMS: 8× for the velocity; FDCHAN turbulent case:
+    35–500×).
+  - **With `ns_method = 'vv'`:** the viscous terms are Crank–Nicolson in each stage, which is 2nd order and less
+    accurate than the Spalart–Moser–Rogers coefficients of the 3-stage scheme.
 - **Wall resolution:** with explicit viscous terms the time-step limit scales with dy_wall². Clustering points
   more than needed at the wall costs a lot. Use `build/ygrid ny tanh alpha Re_tau` (`make ygrid`) to choose `ny`
   and `grid_alpha` for dy⁺_wall ≈ 0.5–1 and dy⁺_centre ≲ 5–9. For example, 193 points with α = 4 at Re_τ = 395
