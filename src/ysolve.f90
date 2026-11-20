@@ -25,7 +25,7 @@
 !
 module mod_ysolve
   use mod_types
-  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run,vv_neumann
+  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run,vv_neumann,pres_lu_stored
   use mod_decomp, only: nkx,nkz,kx_lo,kz_lo
   use mod_compact, only: nbw,ca1 => a1,cb1 => b1,ca2 => a2,cb2 => b2,ct1w => t1w,ct1d => t1d,ct1u => t1u, &
                          ct2w => t2w,ct2d => t2d,ct2u => t2u,cc1 => c1,ccn => cn,cnc1 => nc1,cncn => ncn, &
@@ -46,6 +46,9 @@ module mod_ysolve
   logical , allocatable :: ismean(:,:),isnyq(:)
   real(rp), allocatable :: minv(:,:,:)
   real(rp), allocatable :: uf(:,:,:,:)
+  real(rp), allocatable :: lup(:,:,:,:),lum(:,:,:,:) ! stored LU factors of B1 + k A1 (row 1 replaced) and
+                                                     ! B1 - k A1 (row N replaced), (nkx,nkz,ny,-nbw:nbw):
+                                                     ! L multipliers at -kl..-1, U at 0..ku (pres_lu_stored)
   complex(rp), allocatable :: psi(:,:,:)
   complex(rp), allocatable, public :: phi(:,:,:)
   complex(rp), allocatable :: sx(:,:,:)
@@ -111,6 +114,7 @@ contains
     !$acc enter data copyin(kxv,kzv,kmod,ismean,isnyq)
     allocate(minv(36,nkx,nkz),uf(nkx,nkz,ny,0:nbw),psi(nkx,nkz,ny),phi(nkx,nkz,ny),sx(nkx,nkz,ny))
     !$acc enter data create(minv,uf,psi,phi,sx)
+    if(pres_lu_stored) call init_pressure_lu
     call init_influence_matrix
   end subroutine init_ysolve
   !
@@ -209,6 +213,81 @@ contains
     if(abs(o) <= 1  ) bcol = bcol + ca*a(o,r)
   end function bcol
   !
+  subroutine bfactor(n1,n2,n,i,j,kl,ku,ca,cb,a,b,rep1,repn,lu)
+    !
+    ! LU factorisation (no pivoting) of ca*A + cb*B for column (i,j), the elimination of bsolve kept for
+    ! bsubst: lu(.,.,r,-kl:-1) = multipliers of row r (0 where bsolve skips an elimination), lu(.,.,r,0:ku) = U
+    !
+    !$acc routine seq
+    implicit none
+    integer , intent(in) :: n1,n2,n,i,j,kl,ku
+    real(rp), intent(in) :: ca,cb
+    real(rp), intent(in) :: a(-1:1,n),b(-nbw:nbw,n)
+    logical , intent(in) :: rep1,repn
+    real(rp), intent(inout) :: lu(n1,n2,n,-nbw:nbw)
+    real(rp) :: row(-nbw:nbw),f
+    integer :: r,o,l,q
+    do r=1,n
+      do o=-nbw,nbw
+        row(o) = 0._rp
+      end do
+      if((r == 1 .and. rep1) .or. (r == n .and. repn)) then
+        row(0) = 1._rp
+      else
+        do o=-1,1
+          row(o) = ca*a(o,r)
+        end do
+        do o=-kl,ku
+          row(o) = row(o) + cb*b(o,r)
+        end do
+      end if
+      do l=max(1,r-kl),r-1
+        o = l-r
+        f = 0._rp
+        if(row(o) /= 0._rp) then
+          f = row(o)/lu(i,j,l,0)
+          do q=1,ku
+            if(o+q <= ku) row(o+q) = row(o+q) - f*lu(i,j,l,q)
+          end do
+        end if
+        lu(i,j,r,o) = f
+      end do
+      do q=0,ku
+        lu(i,j,r,q) = row(q)
+      end do
+    end do
+  end subroutine bfactor
+  !
+  subroutine bsubst(n1,n2,n,i,j,kl,ku,lu,x)
+    !
+    ! solves with the factors of bfactor: the operations of bsolve without the elimination
+    !
+    !$acc routine seq
+    implicit none
+    integer , intent(in) :: n1,n2,n,i,j,kl,ku
+    real(rp), intent(in) :: lu(n1,n2,n,-nbw:nbw)
+    complex(rp), intent(inout) :: x(n1,n2,n)
+    real(rp) :: f
+    complex(rp) :: rr
+    integer :: r,l,q
+    do r=1,n
+      rr = x(i,j,r)
+      do l=max(1,r-kl),r-1
+        f = lu(i,j,r,l-r)
+        if(f /= 0._rp) rr = rr - f*x(i,j,l)
+      end do
+      x(i,j,r) = rr
+    end do
+    x(i,j,n) = x(i,j,n)/lu(i,j,n,0)
+    do r=n-1,1,-1
+      rr = x(i,j,r)
+      do q=1,min(ku,n-r)
+        rr = rr - lu(i,j,r,q)*x(i,j,r+q)
+      end do
+      x(i,j,r) = rr/lu(i,j,r,0)
+    end do
+  end subroutine bsubst
+  !
   subroutine pres_rhs(n1,n2,n,i,j,kx,kz,kk,a1,b1,u,v,w,x)
     ! A1 (i kx rx + i kz rz) + B1 ry, all rows
     !$acc routine seq
@@ -257,6 +336,34 @@ contains
     phi(i,j,n) = bt
     call bsolve(n1,n2,n,i,j,klq,kuq,-kk,1._rp,a1,b1,.false.,.true.,phi,uf)
   end subroutine pres_two_solves
+  !
+  subroutine pres_two_solves_lu(n1,n2,n,i,j,klq,kuq,a1,mu,bt,psi,phi,lp,lm,apsn)
+    !
+    ! pres_two_solves with the factors stored by init_pressure_lu
+    !
+    !$acc routine seq
+    implicit none
+    integer , intent(in) :: n1,n2,n,i,j,klq,kuq
+    real(rp), intent(in) :: a1(-1:1,n)
+    real(rp), intent(in) :: lp(n1,n2,n,-nbw:nbw),lm(n1,n2,n,-nbw:nbw)
+    complex(rp), intent(in) :: mu,bt
+    complex(rp), intent(inout) :: psi(n1,n2,n),phi(n1,n2,n)
+    complex(rp), intent(out) :: apsn
+    integer :: r,o
+    complex(rp) :: s
+    psi(i,j,1) = mu
+    call bsubst(n1,n2,n,i,j,klq,kuq,lp,psi)
+    do r=1,n
+      s = (0._rp,0._rp)
+      do o=max(-1,1-r),min(1,n-r)
+        s = s + a1(o,r)*psi(i,j,r+o)
+      end do
+      phi(i,j,r) = s
+    end do
+    apsn = phi(i,j,n)
+    phi(i,j,n) = bt
+    call bsubst(n1,n2,n,i,j,klq,kuq,lm,phi)
+  end subroutine pres_two_solves_lu
   !
   subroutine pres_conds(n1,n2,n,i,j,kk,a1,b1,c1,cn,nc1,ncn,v,psi,phi,rhs1,apsn,sb,st,cc)
     !
@@ -309,6 +416,31 @@ contains
   ! batched operations
   ! ---------------------------------------------------------------------------
   !
+  subroutine init_pressure_lu
+    !
+    ! B1 + k A1 and B1 - k A1 depend only on k: factorise them once for every wavenumber pair (except the
+    ! mean); the pressure steps (explicit and implicit) and the influence matrices then only substitute,
+    ! instead of factorising both matrices twice per column and RK substage
+    !
+    implicit none
+    integer :: i,j
+    real(rp) :: kk
+    if(klq > nbw .or. kuq > nbw) call abort_run('init_pressure_lu: band wider than nbw')
+    allocate(lup(nkx,nkz,ny,-nbw:nbw),lum(nkx,nkz,ny,-nbw:nbw))
+    lup = 0._rp; lum = 0._rp
+    !$acc enter data copyin(lup,lum)
+    !$acc parallel loop gang vector collapse(2) default(present) private(kk) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        if(.not. ismean(i,j)) then
+          kk = kmod(i,j)
+          call bfactor(nkx,nkz,ny,i,j,klq,kuq, kk,1._rp,a1,b1,.true.,.false.,lup)
+          call bfactor(nkx,nkz,ny,i,j,klq,kuq,-kk,1._rp,a1,b1,.false.,.true.,lum)
+        end if
+      end do
+    end do
+  end subroutine init_pressure_lu
+  !
   subroutine init_influence_matrix
     !
     ! 6x6 influence matrix (inverted) for every wavenumber pair
@@ -338,7 +470,11 @@ contains
             call add_sources(nkx,nkz,ny,i,j,a1,b1,-1._rp,xs,psi)
             rhs1 = psi(i,j,1)
             mu = xs(5); bt = xs(6)
-            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,mu,bt,psi,phi,uf,apsn)
+            if(pres_lu_stored) then
+              call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,mu,bt,psi,phi,lup,lum,apsn)
+            else
+              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,mu,bt,psi,phi,uf,apsn)
+            end if
             call pres_conds(nkx,nkz,ny,i,j,kk,a1,b1,c1,cn,nc1,ncn,sx,psi,phi,rhs1,apsn,xs(1),xs(2),cc)
             do q=1,6
               mat(q,m) = real(cc(q),rp)
@@ -421,7 +557,11 @@ contains
           !
           call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
           rhs1 = psi(i,j,1)
-          call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+          if(pres_lu_stored) then
+            call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,zero,zero,psi,phi,lup,lum,apsn)
+          else
+            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+          end if
           call pres_conds(nkx,nkz,ny,i,j,kk,a1,b1,c1,cn,nc1,ncn,v,psi,phi,rhs1,apsn,zero,zero,cc)
           !
           ! influence-matrix coefficients
@@ -437,7 +577,11 @@ contains
           !
           call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
           call add_sources(nkx,nkz,ny,i,j,a1,b1,-1._rp,xs,psi)
-          call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+          if(pres_lu_stored) then
+            call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,xs(5),xs(6),psi,phi,lup,lum,apsn)
+          else
+            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+          end if
           do r=2,ny-1
             u(i,j,r) = u(i,j,r) - cmplx(0._rp,kx,rp)*phi(i,j,r)
             w(i,j,r) = w(i,j,r) - cmplx(0._rp,kz,rp)*phi(i,j,r)
@@ -1088,7 +1232,11 @@ contains
               xs(m) = (1._rp,0._rp)
               call add_sources(nkx,nkz,ny,i,j,a1,b1,1._rp,xs,psi)
               rhs1 = psi(i,j,1)
-              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+              if(pres_lu_stored) then
+                call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,xs(5),xs(6),psi,phi,lup,lum,apsn)
+              else
+                call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+              end if
               cc(1) = bmul(nkx,nkz,ny,i,j,1 , kk,1._rp,a1,b1,psi) - rhs1
               cc(2) = bmul(nkx,nkz,ny,i,j,ny,-kk,1._rp,a1,b1,phi) - apsn
               do r=1,ny
@@ -1180,7 +1328,11 @@ contains
             call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
             call add_a1(nkx,nkz,ny,i,j,a1,cvec,psi)
             rhs1 = psi(i,j,1)
-            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+            if(pres_lu_stored) then
+              call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,zero,zero,psi,phi,lup,lum,apsn)
+            else
+              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+            end if
             cc(1) = bmul(nkx,nkz,ny,i,j,1 , kk,1._rp,a1,b1,psi) - rhs1
             cc(2) = bmul(nkx,nkz,ny,i,j,ny,-kk,1._rp,a1,b1,phi) - apsn
             do r=1,ny
@@ -1200,7 +1352,11 @@ contains
             call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
             call add_a1(nkx,nkz,ny,i,j,a1,cvec,psi)
             call add_sources(nkx,nkz,ny,i,j,a1,b1,1._rp,xs,psi)
-            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+            if(pres_lu_stored) then
+              call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,xs(5),xs(6),psi,phi,lup,lum,apsn)
+            else
+              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+            end if
             do r=1,ny
               psi(i,j,r) = v(i,j,r) - psi(i,j,r) - kk*phi(i,j,r)
             end do

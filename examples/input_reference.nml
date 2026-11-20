@@ -58,6 +58,9 @@
   impl_maxit = 10                      ! implicit only: max. iterations of the velocity-pressure      [10]
                                        !   coupling per RK substep
   impl_tol   = 1.e-12                  ! implicit only: stop when max|v^{m+1}-v^m| < impl_tol*max|v|  [1e-12]
+  pres_lu_stored = .true.              ! factorise the wall-normal pressure matrices once at start-up  [.true.]
+                                       !   (+56 bytes per point; the pressure step then only substitutes);
+                                       !   .false.: factorise them in every pressure step (less memory)
 /
 
 !------------------------------------------------------------------------------------------------------
