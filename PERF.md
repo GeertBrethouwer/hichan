@@ -36,6 +36,32 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
   Dirichlet walls are cheaper than Neumann walls (fewer solves per step).
 - **`fixed_dt = .false.`**, with a sensible `dt_max`.
 
+## 2b. `fd_order = 8`: fewer wall-normal points
+
+The 8th-order scheme has 4th-order wall closures instead of 3rd-order ones, and these set the accuracy of the
+pressure step. The manufactured-solution test (tests/README_MMS.md) gives:
+
+| quantity, ny = 129 | `fd_order = 6` | `fd_order = 8` |
+|---|---|---|
+| pressure step (velocity) | 2.6e-7, 4th order | 8.6e-9, 5th order |
+| forced time-dependent run, error of v | 2.7e-7, 4th order | 9.2e-9, 5th order |
+
+TS wave (Re = 5000), error of ω_i:
+
+| ny | `fd_order = 6` | `fd_order = 8` |
+|---|---|---|
+| 65 | 3.4e-7 | 1.5e-7 |
+| 97 | | 2.1e-9 |
+
+Cost on one CPU core (64 × 129 × 64, one scalar): 18–26 % more per step.
+
+- **Pressure step:** +50 %. The band of B1 ± k A1 grows from 3 to 4 because of the 5-point wall row.
+- **Implicit scalar solves:** +45 %. The band of the D2 matrices grows from 3 to 5.
+- **Nonlinear part:** +5–10 %.
+
+On GPUs, where the transposes dominate, the step costs relatively less extra. The U factors of the banded solves
+take 8 bytes more per grid point, for all orders (`nbw` = 5).
+
 ## 3. Grid sizes that suit the FFTs and the parallel split
 
 - The FFT lengths are 3·nx/2 and 3·nz/2. Choose `nx` and `nz` so these contain only factors 2, 3 and 5:
@@ -94,7 +120,7 @@ and with OpenACC also the GPU memory actually used after the initialisation. Per
 | spectral fields u, v, w, N, N_old, 2 work arrays (11 × 8 B) | 88 |
 | per scalar: s, N, N_old | 24 |
 | physical fields on the dealiased grid, 7 × 18 B (`rotational`); 5 × 18 B with `nl_form = 'advective'` | 126 (90) |
-| wall-normal solver work arrays | 40 |
+| wall-normal solver work arrays | 48 |
 | FFT buffers (shared between stages; also the cuFFT work area) | 30 |
 | transpose buffers (MPI or diezDecomp; cuDecomp similar, printed at start-up) | 24 (12 with `transpose_prec = 'single'`; cuDecomp single: about the same as double, because of staging arrays) |
 | implicit viscous terms (`visc_theta > 0`) / `'vv'` | +24 / +32 |

@@ -42,6 +42,7 @@ module mod_ysolve
   real(rp), allocatable :: b1m(:,:),t1mw(:),t1md(:),t1mu(:),rxi(:)
   real(rp), allocatable, public :: c1(:),cn(:),wq(:)
   integer :: nc1,ncn,klq,kuq,klh,kuh
+  integer :: kd1,kd2           ! loop half-widths of B1 f and B2 f (actual bandwidths, <= nbw)
   real(rp), allocatable :: kxv(:),kzv(:),kmod(:,:)
   logical , allocatable :: ismean(:,:),isnyq(:)
   real(rp), allocatable :: minv(:,:,:)
@@ -82,6 +83,7 @@ contains
     nc1 = cnc1; ncn = cncn
     klq = max(ckl1,1); kuq = max(cku1,1)
     klh = max(ckl2,1); kuh = max(cku2,1)
+    kd1 = max(klq,kuq); kd2 = max(klh,kuh)
     !$acc enter data copyin(a1,b1,a2,b2,t1w,t1d,t1u,t2w,t2d,t2u,c1,cn,wq)
     allocate(b1m,source=cb1m); allocate(rxi,source=crxi)
     allocate(t1mw,source=ct1mw); allocate(t1md,source=ct1md); allocate(t1mu,source=ct1mu)
@@ -288,11 +290,11 @@ contains
     end do
   end subroutine bsubst
   !
-  subroutine pres_rhs(n1,n2,n,i,j,kx,kz,kk,a1,b1,u,v,w,x)
+  subroutine pres_rhs(n1,n2,n,i,j,kx,kz,kk,a1,b1,u,v,w,x,kb)
     ! A1 (i kx rx + i kz rz) + B1 ry, all rows
     !$acc routine seq
     implicit none
-    integer , intent(in) :: n1,n2,n,i,j
+    integer , intent(in) :: n1,n2,n,i,j,kb
     real(rp), intent(in) :: kx,kz,kk,a1(-1:1,n),b1(-nbw:nbw,n)
     complex(rp), intent(in) :: u(n1,n2,n),v(n1,n2,n),w(n1,n2,n)
     complex(rp), intent(inout) :: x(n1,n2,n)
@@ -300,7 +302,7 @@ contains
     complex(rp) :: s
     do r=1,n
       s = (0._rp,0._rp)
-      do o=max(-nbw,1-r),min(nbw,n-r)
+      do o=max(-kb,1-r),min(kb,n-r)
         s = s + b1(o,r)*v(i,j,r+o)
         if(abs(o) <= 1) s = s + a1(o,r)*cmplx(0._rp,1._rp,rp)*(kx*u(i,j,r+o)+kz*w(i,j,r+o))
       end do
@@ -555,7 +557,7 @@ contains
           !
           ! particular solution
           !
-          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
           rhs1 = psi(i,j,1)
           if(pres_lu_stored) then
             call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,zero,zero,psi,phi,lup,lum,apsn)
@@ -575,7 +577,7 @@ contains
           !
           ! final solve with the corrected right-hand side and boundary values
           !
-          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
           call add_sources(nkx,nkz,ny,i,j,a1,b1,-1._rp,xs,psi)
           if(pres_lu_stored) then
             call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,xs(5),xs(6),psi,phi,lup,lum,apsn)
@@ -635,7 +637,7 @@ contains
       do i=1,nkx
         do r=1,ny
           s = (0._rp,0._rp)
-          do o=max(-nbw,1-r),min(nbw,ny-r)
+          do o=max(-kd1,1-r),min(kd1,ny-r)
             s = s + b1m(o,r)*f(i,j,r+o)
           end do
           if(r > 1) s = s - t1mw(r)*df(i,j,r-1)
@@ -664,7 +666,7 @@ contains
       do i=1,nkx
         do r=1,ny
           s = (0._rp,0._rp)
-          do o=max(-nbw,1-r),min(nbw,ny-r)
+          do o=max(-kd1,1-r),min(kd1,ny-r)
             s = s + b1(o,r)*f(i,j,r+o)
           end do
           if(r > 1) s = s - t1w(r)*df(i,j,r-1)
@@ -694,7 +696,7 @@ contains
         k2 = kmod(i,j)**2
         do r=1,ny
           s = (0._rp,0._rp)
-          do o=max(-nbw,1-r),min(nbw,ny-r)
+          do o=max(-kd2,1-r),min(kd2,ny-r)
             s = s + b2(o,r)*f(i,j,r+o)
           end do
           if(r > 1) s = s - t2w(r)*tmp(i,j,r-1)
@@ -1325,7 +1327,7 @@ contains
             !
             ! particular solution
             !
-            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
             call add_a1(nkx,nkz,ny,i,j,a1,cvec,psi)
             rhs1 = psi(i,j,1)
             if(pres_lu_stored) then
@@ -1349,7 +1351,7 @@ contains
             !
             ! corrected solution
             !
-            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
             call add_a1(nkx,nkz,ny,i,j,a1,cvec,psi)
             call add_sources(nkx,nkz,ny,i,j,a1,b1,1._rp,xs,psi)
             if(pres_lu_stored) then

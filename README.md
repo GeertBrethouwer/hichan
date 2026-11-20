@@ -8,7 +8,9 @@ HiCHAN solves the incompressible Navier–Stokes equations in a plane channel, t
 
 * **x, z (streamwise, spanwise):** Fourier series, pseudo-spectral nonlinear terms, 3/2-rule dealiasing.
 * **y (wall-normal):** collocated compact finite differences on an arbitrary (e.g. tanh-stretched) grid, with
-  the (3-4-3) fourth-order or (3-5-6-5-3) sixth-order schemes of the paper. Coefficients are computed directly
+  the (3-4-3) fourth-order or (3-5-6-5-3) sixth-order schemes of the paper, or (`fd_order = 8`) an eighth-order
+  scheme: tridiagonal with a 7-point right-hand side, explicit one-sided wall rows (5 points for D1, 6 for D2) and
+  tridiagonal rows 2–3 with 4-point right-hand sides (the scheme of FDCHAN). Coefficients are computed directly
   on the non-uniform grid. First and second derivatives are both compact (`A1 f' = B1 f`, `A2 f'' = B2 f`).
 * **Pressure:** influence-matrix method. Continuity is satisfied exactly at **every** grid point, including the
   walls, so the discrete divergence is at round-off level (1e-15 to 1e-10, depending on grid and resolution).
@@ -357,7 +359,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 
 | namelist | contents |
 |---|---|
-| `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `dealias` |
+| `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4, 6 or 8), `dealias` |
 | `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol`, `pres_lu_stored` (pressure matrices factorised once at start-up, +56 B per point; see PERF.md) |
 | `&time` | `nstep`, `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |

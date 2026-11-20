@@ -14,7 +14,7 @@ program hichan
   use mod_types
   use mod_param
   use mod_decomp
-  use mod_compact, only: init_grid,init_compact,yg,kl1,ku1,kl2,ku2,nc1,ncn,lam2max
+  use mod_compact, only: init_grid,init_compact,yg,kl1,ku1,kl2,ku2,nc1,ncn,lam2max,nbw
   use mod_fields
   use mod_fft
   use mod_ysolve
@@ -173,7 +173,7 @@ contains
     if(trim(nl_form) == 'rotational') ng = 3
     b(1) = sp*(11+3*max(nscal,1))
     b(2) = ph*(4+ng)
-    b(3) = sp*5 + 8_i8*36*nkx*nkz
+    b(3) = sp*3 + 8_i8*(nbw+1)*nkx*nkz*ny + 8_i8*36*nkx*nkz   ! psi, phi, sx and the U factors uf
     b(4) = 0
     if(visc_theta > 0._rp .and. ns_method /= 'vv') b(4) = b(4) + sp*3 + 8_i8*120*nkx*nkz
     if(ns_method == 'vv')  b(4) = b(4) + sp*4 + 8_i8*28*nkx*nkz

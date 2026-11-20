@@ -125,3 +125,29 @@ No errors were found:
 
 The accuracy of the velocity is limited to 4th order by the pressure step, i.e. by the 3rd-order wall closures of
 D1. A higher-order wall closure for D1 is the place to improve the 6th-order scheme.
+
+### fd_order = 8
+
+**Operators at t = 0:**
+
+| ny | diffusion all / core | pressure velocity | nonlinear | scalar div. form (all / core) |
+|---|---|---|---|---|
+| 33 | 1.3e-6 / 1.7e-9 | 9.2e-6 | 1.2e-8 | 3.4e-5 / 2.4e-7 |
+| 65 | 5.3e-8 / 6.9e-12 | 2.8e-7 | 2.2e-10 | 1.4e-6 / 1.0e-9 |
+| 129 | 2.6e-9 / 1.4e-13 | 8.6e-9 | 5.1e-12 | 6.9e-8 / 3.9e-12 |
+| 257 | 1.4e-10 | 2.7e-10 | 1.4e-13 | 3.9e-9 / 2.4e-14 |
+| order | 4.3 / 8 | 5 | 8 | 4.3 / 8 |
+
+The divergence is at round-off.
+
+**Time-dependent runs** (Re = 1000, dt = 2e-3, t = 0.5; largest velocity error):
+
+| ny | skew scalars, θ = 0.5, Ri = 0.3 | vv | implicit θ = 0.5, advective |
+|---|---|---|---|
+| 33 | 1.4e-5 | 8.4e-6 | 1.3e-5 |
+| 65 | 5.2e-7 | 1.7e-7 | 4.9e-7 |
+| 129 | 1.7e-8 | 2.2e-9 | 1.7e-8 |
+
+- Scalars at ny = 129: DD 1.0e-9 (6th order), NN 4.7e-8 (5th order).
+- vv divergence at ny = 129: 7.6e-9 (order 6: 5e-7).
+- Orders 4 and 6 give results bitwise identical to before the change.
