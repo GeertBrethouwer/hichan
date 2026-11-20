@@ -34,8 +34,8 @@ module mod_param
   real(rp) :: visc_theta = 0._rp          ! theta of the viscous term (0: explicit, Appendix B.1; >0: implicit, B.2)
   integer  :: impl_maxit = 10              ! max. iterations of the implicit pressure/velocity coupling (B.2)
   real(rp) :: impl_tol = 1.e-12_rp         ! convergence: max|v^{m+1}-v^m| < impl_tol*max|v|
-  logical  :: pres_lu_stored = .true.      ! factorise the pressure matrices B1 +- k A1 once at start-up (14 reals
-                                           !   per spectral point); .false.: factorise them in every pressure step
+  logical  :: pres_lu_stored = .true.      ! factorise the pressure matrices B1 +- k A1 once at start-up (10 reals,
+                                           !   18 with fd_order = 8, per spectral point); .false.: factorise them in every pressure step
   character(len=16) :: nl_form = 'rotational' ! 'rotational' (energy conserving, 9 FFTs) or 'advective' (as in the paper, 15 FFTs)
   !
   ! &time

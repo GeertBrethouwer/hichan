@@ -25,7 +25,8 @@ tests/mms_run.sh run 129 0.002 re=1000 nscal=2 scal_form=skew scal_theta=0.5 bc1
 
 `mms_run.sh TEST NY DT key=value...` writes `input.nml` and runs `build/mms` (`NP=` ranks, `pdims=`). Keys: `re`,
 `nl_form`, `visc_theta`, `ns_method`, `fd_order`, `grid_alpha`, `nx`, `nz`, `tend`, `nscal`, `scal_form`,
-`scal_theta`, `bc1`/`bc2` (wall conditions of scalars 1 and 2: DD, DN, ND, NN), `ri` (scalar 1; scalar 2 has 0.5).
+`scal_theta`, `bc1`/`bc2` (wall conditions of scalars 1 and 2: DD, DN, ND, NN), `ri` (scalar 1; scalar 2 has 0.5),
+`rk` (`rk_stages`), `lu` (`pres_lu_stored`, default `.true.`).
 All runs use `forcing = 'cpg'` with `dpdx = 0` (the forcing contains the mean pressure gradient).
 
 ## Results (laptop CPU, tanh grid α = 3, nx = nz = 16)
@@ -167,3 +168,19 @@ So the 4-stage scheme is 3rd order, with about 8× smaller errors than 3 stages 
 order: Crank–Nicolson in each stage. 3 stages with the SMR coefficients give 8.7e-7, 1.2e-7 and 1.9e-8.
 
 With `rk_stages = 3` the results are bitwise identical to before.
+
+### Combined (branch `integrate`: perf/scalar-solve-fft2d + pressure-lu + order8 + rk4)
+
+`fd_order = 8`, `rk_stages = 4`, `visc_theta = 0.5`, 2 ranks (`pdims = 1, 2`), two scalars in divergence form
+(DN / ND, θ = 0.5, Ri = 0.3), Re = 1000, dt = 2e-3, t = 0.5:
+
+| ny | velocity (largest) | scalar 1 / 2 |
+|---|---|---|
+| 33 | 1.4e-5 | 1.3e-6 / 6.3e-6 |
+| 65 | 5.2e-7 | 4.6e-8 / 1.8e-7 |
+| 129 | 1.7e-8 | 1.4e-9 / 5.0e-9 |
+
+- `pres_lu_stored = .false.` gives the same errors to all printed digits.
+- `fd_order = 8` with `rk_stages = 4` and `ns_method = 'vv'` at ny = 129: core error 2.2e-10, divergence 7.6e-9.
+- All other cases above reproduce their values to all printed digits on the merged code.
+- With `fd_order = 6` and `rk_stages = 3`, `build/hichan` is bitwise identical to perf/scalar-solve-fft2d.

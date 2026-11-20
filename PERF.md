@@ -134,13 +134,16 @@ and with OpenACC also the GPU memory actually used after the initialisation. Per
 | FFT buffers (shared between stages; also the cuFFT work area) | 30 |
 | transpose buffers (MPI or diezDecomp; cuDecomp similar, printed at start-up) | 24 (12 with `transpose_prec = 'single'`; cuDecomp single: about the same as double, because of staging arrays) |
 | implicit viscous terms (`visc_theta > 0`) / `'vv'` | +24 / +32 |
-| stored pressure factors (`pres_lu_stored = .true.`, the default; not with `'vv'`) | +56 |
+| stored pressure factors (`pres_lu_stored = .true.`, the default; not with `'vv'`) | +40 (`fd_order` 4, 6), +72 (8) |
+| `fd_order = 8`: wider band in the solver work arrays | +8 |
 
-Explicit, rotational form, one scalar: about 330 bytes per point with `pres_lu_stored = .false.`, 386 with the
+Explicit, rotational form, one scalar: about 330 bytes per point with `pres_lu_stored = .false.`, 370 with the
 default `.true.`, plus the CUDA/NCCL/MPI context (1–2 GB per GPU).
 Example: 2560 × 385 × 1920 with one scalar: 1.89·10⁹ points × 332 B ≈ 630 GB, i.e. ≈ 79 GB per GPU on 8 GH200s
-(96 GB each). That is too tight for the stored pressure factors (≈ 92 GB per GPU): on 8 GPUs set
-`pres_lu_stored = .false.`; on 16 GPUs (≈ 46 GB per GPU) keep the default.
+(96 GB each). With the stored pressure factors it is 1.89·10⁹ × 372 B ≈ 703 GB, ≈ 88 GB per GPU: on 8 GPUs
+that leaves little margin for the CUDA/MPI context, so check the memory report at start-up and set
+`pres_lu_stored = .false.` if it is too tight; on 16 GPUs (≈ 44 GB per GPU) keep the default. The factors are
+sized by the actual band of B1 (±2 for `fd_order` 4 and 6, ±4 for 8).
 
 **`pres_lu_stored`** (`&physics`): the matrices B1 ± k A1 of the pressure step depend only on k, so by default they
 are factorised once at start-up instead of four times per wavenumber pair and RK substep. Results are bitwise

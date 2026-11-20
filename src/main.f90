@@ -35,9 +35,9 @@ program hichan
   call MPI_COMM_RANK(MPI_COMM_WORLD,myid,ierr)
   call read_input(myid)
   call init_decomp
-  call memory_estimate()
   call init_grid(ny,grid_type,grid_alpha,grid_file)
   call init_compact(ny,fd_order)
+  call memory_estimate()               ! after init_compact: needs the bandwidths kl1, ku1
   call alloc_fields
   call init_fft(up)
   call init_ysolve
@@ -173,7 +173,7 @@ contains
     if(trim(nl_form) == 'rotational') ng = 3
     b(1) = sp*(11+3*max(nscal,1))
     b(2) = ph*(4+ng)
-    b(3) = sp*3 + 8_i8*(nbw+1)*nkx*nkz*ny + 8_i8*36*nkx*nkz   ! psi, phi, sx and the U factors uf
+    b(3) = sp*3 + 8_i8*(max(ku1,ku2,1)+1)*nkx*nkz*ny + 8_i8*36*nkx*nkz   ! psi, phi, sx and the U factors uf
     if(pres_lu_stored) b(3) = b(3) + 16_i8*(max(kl1,1)+max(ku1,1)+1)*nkx*nkz*ny  ! stored pressure LU factors
     b(4) = 0
     if(visc_theta > 0._rp .and. ns_method /= 'vv') b(4) = b(4) + sp*3 + 8_i8*40*rk_stages*nkx*nkz

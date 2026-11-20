@@ -114,7 +114,7 @@ contains
       end do
     end do
     !$acc enter data copyin(kxv,kzv,kmod,ismean,isnyq)
-    allocate(minv(36,nkx,nkz),uf(nkx,nkz,ny,0:nbw),psi(nkx,nkz,ny),phi(nkx,nkz,ny),sx(nkx,nkz,ny))
+    allocate(minv(36,nkx,nkz),uf(nkx,nkz,ny,0:max(kuq,kuh)),psi(nkx,nkz,ny),phi(nkx,nkz,ny),sx(nkx,nkz,ny))
     !$acc enter data create(minv,uf,psi,phi,sx)
     if(pres_lu_stored) call init_pressure_lu
     call init_influence_matrix
@@ -138,7 +138,7 @@ contains
     real(rp), intent(in) :: a(-1:1,n),b(-nbw:nbw,n)
     logical , intent(in) :: rep1,repn
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     real(rp) :: row(-nbw:nbw),f
     complex(rp) :: rr
     integer :: r,o,l,q
@@ -321,7 +321,7 @@ contains
     real(rp), intent(in) :: kk,a1(-1:1,n),b1(-nbw:nbw,n)
     complex(rp), intent(in) :: mu,bt
     complex(rp), intent(inout) :: psi(n1,n2,n),phi(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:kuq)
     complex(rp), intent(out) :: apsn
     integer :: r,o
     complex(rp) :: s
@@ -1057,7 +1057,7 @@ contains
     integer , intent(in) :: n1,n2,n,i,j,kl,ku
     real(rp), intent(in) :: ca,cb,a2(-1:1,n),b2(-nbw:nbw,n)
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     real(rp), intent(out) :: h(4)
     real(rp) :: m11,m12,m21,m22,det
     integer :: r
@@ -1090,7 +1090,7 @@ contains
     real(rp), intent(in) :: ca,cb,a2(-1:1,n),b2(-nbw:nbw,n),h(4)
     complex(rp), intent(in) :: g(n1,n2,n)
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     complex(rp), intent(out) :: t1,tn
     complex(rp) :: e1,e2
     call a2rhs(n1,n2,n,i,j,a2,g,x)
@@ -1132,7 +1132,7 @@ contains
     integer , intent(in) :: n1,n2,n,i,j,klh,kuh,nc1,ncn
     real(rp), intent(in) :: kk,ca,cb,a1(-1:1,n),b1(-nbw:nbw,n),a2(-1:1,n),b2(-nbw:nbw,n),c1(n),cn(n),h(4)
     complex(rp), intent(inout) :: psi(n1,n2,n),phi(n1,n2,n),sx(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:kuh)
     complex(rp), intent(in) :: rhs1,apsn,db,dt_
     complex(rp), intent(inout) :: cc(6)
     complex(rp) :: t1,tn,s5,s6
@@ -1551,7 +1551,7 @@ contains
     real(rp), intent(in) :: ca,cb,a2(-1:1,n),b2(-nbw:nbw,n),h(4)
     complex(rp), intent(in) :: g(n1,n2,n),wa_,wb_
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     complex(rp) :: e1,e2,t1,tn
     call a2rhs(n1,n2,n,i,j,a2,g,x)
     x(i,j,1) = wa_; x(i,j,n) = wb_
