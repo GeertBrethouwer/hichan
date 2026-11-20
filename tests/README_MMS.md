@@ -151,3 +151,19 @@ The divergence is at round-off.
 - Scalars at ny = 129: DD 1.0e-9 (6th order), NN 4.7e-8 (5th order).
 - vv divergence at ny = 129: 7.6e-9 (order 6: 5e-7).
 - Orders 4 and 6 give results bitwise identical to before the change.
+
+### rk_stages = 4
+
+**Explicit, Re = 10⁴, ny = 257, t = 1** (u, v, w):
+
+| dt | 3 stages | 4 stages |
+|---|---|---|
+| 0.02 | 1.1e-7, 2.8e-7, 2.6e-7 | 1.3e-8, 2.2e-8, 2.2e-8 |
+| 0.01 | 1.4e-8, 3.6e-8, 3.3e-8 | 1.9e-9 (then the spatial floor) |
+
+So the 4-stage scheme is 3rd order, with about 8× smaller errors than 3 stages at the same dt.
+
+**vv, Re = 100, ny = 129:** the error of u is 1.0e-6, 2.5e-7 and 6.1e-8 for dt = 0.04, 0.02 and 0.01. That is 2nd
+order: Crank–Nicolson in each stage. 3 stages with the SMR coefficients give 8.7e-7, 1.2e-7 and 1.9e-8.
+
+With `rk_stages = 3` the results are bitwise identical to before.

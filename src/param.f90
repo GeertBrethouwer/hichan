@@ -47,7 +47,9 @@ module mod_param
   logical  :: fixed_dt = .false.
   real(rp) :: dt_max = 1._rp                ! upper bound of the adaptive time step
   real(rp) :: dt_growth = 1.1_rp            ! adaptive dt may grow by at most this factor per step
-  real(rp) :: cfl = 1.0_rp, cfl_visc = 1.5_rp ! RK3: |lambda dt| < sqrt(3) (imag.) and 2.51 (real)
+  real(rp) :: cfl = 1.0_rp, cfl_visc = 1.5_rp ! limits |lambda dt| < sqrt(3) (imag.) and 2.51 (real) with 3 RK
+                                             !   stages, sqrt(8) = 2.83 and 2.79 with 4 stages
+  integer  :: rk_stages = 3                 ! low-storage RK3 with 3 stages (Wray) or 4 stages (SIMSON)
   !
   ! &init
   !
@@ -109,17 +111,24 @@ module mod_param
   real(rp) :: gvec(3) = 0._rp              ! unit vector in the direction of gravity
   logical  :: is_buoyant = .false.         ! at least one active scalar
   !
-  ! low-storage RK3 coefficients (Table 1)
+  ! low-storage RK3 coefficients, set in read_input for rk_stages = 3 or 4:
+  !   u^q = u^{q-1} + dt (gam_q N^{q-1} + zet_q N^{q-2}) - bet_q dt grad p,  bet = gam + zet
+  ! 3 stages: Table 1 (Wray); 4 stages: Table 5.1 of the SIMSON user guide (Chevalier et al. 2007),
+  ! also third order, |lambda dt| < sqrt(8) on the imaginary axis and 2.79 on the real axis
   !
-  real(rp), parameter :: rk_gam(3) = [ 8._rp/15._rp, 5._rp/12._rp,  3._rp/4._rp]
-  real(rp), parameter :: rk_zet(3) = [ 0._rp      ,-17._rp/60._rp,-5._rp/12._rp]
-  real(rp), parameter :: rk_bet(3) = rk_gam(:) + rk_zet(:)
+  real(rp), parameter :: rk3_gam(3) = [ 8._rp/15._rp, 5._rp/12._rp,  3._rp/4._rp]
+  real(rp), parameter :: rk3_zet(3) = [ 0._rp      ,-17._rp/60._rp,-5._rp/12._rp]
+  real(rp), parameter :: rk4_gam(4) = [ 8._rp/17._rp, 17._rp/60._rp, 5._rp/12._rp, 3._rp/4._rp]
+  real(rp), parameter :: rk4_zet(4) = [ 0._rp      ,-15._rp/68._rp,-17._rp/60._rp,-5._rp/12._rp]
+  real(rp) :: rk_gam(4) = 0._rp, rk_zet(4) = 0._rp, rk_bet(4) = 0._rp
   !
-  ! implicit/explicit split of the linear terms in the 'vv' method (Spalart, Moser & Rogers 1991,
-  ! Eqs. (30)-(32) of Lluesma-Rodriguez et al. 2021): (I - b_q dt L) f^{q+1} = (I + a_q dt L) f^q + ...
+  ! implicit/explicit split of the linear terms in the 'vv' method: (I - b_q dt L) f^{q+1} = (I + a_q dt L) f^q
+  ! + ...; 3 stages: Spalart, Moser & Rogers 1991 (Eqs. (30)-(32) of Lluesma-Rodriguez et al. 2021);
+  ! 4 stages: Crank-Nicolson within each stage, a_q = b_q = bet_q/2 (as SIMSON)
   !
-  real(rp), parameter :: rk_asmr(3) = [29._rp/96._rp, -3._rp/40._rp, 1._rp/6._rp]
-  real(rp), parameter :: rk_bsmr(3) = [37._rp/160._rp, 5._rp/24._rp, 1._rp/6._rp]
+  real(rp), parameter :: rk3_asmr(3) = [29._rp/96._rp, -3._rp/40._rp, 1._rp/6._rp]
+  real(rp), parameter :: rk3_bsmr(3) = [37._rp/160._rp, 5._rp/24._rp, 1._rp/6._rp]
+  real(rp) :: rk_asmr(4) = 0._rp, rk_bsmr(4) = 0._rp
 contains
   subroutine read_input(myid)
     implicit none
@@ -127,7 +136,7 @@ contains
     integer :: iunit,ios
     namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
     namelist /physics/ re,forcing,ubulk,dpdx,ns_method,vv_neumann,nl_form,visc_theta,impl_maxit,impl_tol,pres_lu_stored
-    namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
+    namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc,rk_stages
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start,stats_restart, &
                       mode_log_kx,mode_log_kz,timing,timing_sync
@@ -159,6 +168,16 @@ contains
     if(ny < 9) call abort_run('ny must be at least 9')
     if(all(fd_order /= [4,6,8])) call abort_run('fd_order must be 4, 6 or 8')
     if(dt <= 0._rp) call abort_run('dt must be > 0')
+    if(all(rk_stages /= [3,4])) call abort_run('rk_stages must be 3 or 4')
+    if(rk_stages == 4) then
+      rk_gam = rk4_gam; rk_zet = rk4_zet
+      rk_bet = rk_gam + rk_zet
+      rk_asmr = 0.5_rp*rk_bet; rk_bsmr = 0.5_rp*rk_bet
+    else
+      rk_gam(1:3) = rk3_gam; rk_zet(1:3) = rk3_zet
+      rk_bet = rk_gam + rk_zet
+      rk_asmr(1:3) = rk3_asmr; rk_bsmr(1:3) = rk3_bsmr
+    end if
     if(ls_nmin < 1 .or. ls_nmax < ls_nmin) call abort_run('&init: 1 <= ls_nmin <= ls_nmax required')
     if(dt_growth < 1._rp) call abort_run('dt_growth must be >= 1')
     if(all(ns_method /= ['im ','vv '])) call abort_run("ns_method must be 'im' or 'vv'")
@@ -226,6 +245,7 @@ contains
       else
         write(*,fr) 'adaptive time step, cfl, cfl_visc',cfl,cfl_visc
       end if
+      write(*,fi) 'Runge-Kutta stages (RK3)',rk_stages
       write(*,fi) 'nstep',nstep
       if(tmax < huge(1._rp)) write(*,fr) 'tmax',tmax
       write(*,f1) 'initial condition',trim(init_type)

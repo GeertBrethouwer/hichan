@@ -25,7 +25,7 @@
 !
 module mod_ysolve
   use mod_types
-  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run,vv_neumann,pres_lu_stored
+  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run,vv_neumann,pres_lu_stored,rk_stages
   use mod_decomp, only: nkx,nkz,kx_lo,kz_lo
   use mod_compact, only: nbw,ca1 => a1,cb1 => b1,ca2 => a2,cb2 => b2,ct1w => t1w,ct1d => t1d,ct1u => t1u, &
                          ct2w => t2w,ct2d => t2d,ct2u => t2u,cc1 => c1,ccn => cn,cnc1 => nc1,cncn => ncn, &
@@ -58,9 +58,9 @@ module mod_ysolve
   !
   ! implicit viscous terms (Appendix B.2): per RK substep q, cached for c_q = theta*beta_q*dt/Re
   !
-  real(rp), allocatable :: minv_i(:,:,:,:)   ! (36,nkx,nkz,3) inverse 6x6 influence matrices
-  real(rp), allocatable :: hinv_i(:,:,:,:)   ! (4 ,nkx,nkz,3) inverse 2x2 wall corrections of the Helmholtz solves
-  real(rp) :: c_cached(3) = -1._rp
+  real(rp), allocatable :: minv_i(:,:,:,:)   ! (36,nkx,nkz,rk_stages) inverse 6x6 influence matrices
+  real(rp), allocatable :: hinv_i(:,:,:,:)   ! (4 ,nkx,nkz,rk_stages) inverse 2x2 wall corrections of the Helmholtz solves
+  real(rp) :: c_cached(4) = -1._rp
   complex(rp), allocatable :: vit(:,:,:),cvec(:,:,:),tw1(:,:,:)
   !
   ! velocity-vorticity method ('vv')
@@ -68,7 +68,7 @@ module mod_ysolve
   complex(rp), allocatable, public :: phv(:,:,:),om(:,:,:)  ! phi = lap(v) and omega_y (mean columns: W00, U00)
   complex(rp), allocatable :: wa(:,:,:),wb(:,:,:)
   real(rp), allocatable :: hinv_c(:,:,:,:),ginv_v(:,:,:,:),hinv_v(:,:,:)
-  real(rp) :: c_cached_vv(3) = -1._rp
+  real(rp) :: c_cached_vv(4) = -1._rp
   real(rp), allocatable :: dw1(:),dwn(:)    ! wall-derivative functionals used for dv/dy = 0
   integer :: ndw1,ndwn
 contains
@@ -226,7 +226,7 @@ contains
     real(rp), intent(in) :: ca,cb
     real(rp), intent(in) :: a(-1:1,n),b(-nbw:nbw,n)
     logical , intent(in) :: rep1,repn
-    real(rp), intent(inout) :: lu(n1,n2,n,-nbw:nbw)
+    real(rp), intent(inout) :: lu(n1,n2,n,-kl:ku)
     real(rp) :: row(-nbw:nbw),f
     integer :: r,o,l,q
     do r=1,n
@@ -267,7 +267,7 @@ contains
     !$acc routine seq
     implicit none
     integer , intent(in) :: n1,n2,n,i,j,kl,ku
-    real(rp), intent(in) :: lu(n1,n2,n,-nbw:nbw)
+    real(rp), intent(in) :: lu(n1,n2,n,-kl:ku)
     complex(rp), intent(inout) :: x(n1,n2,n)
     real(rp) :: f
     complex(rp) :: rr
@@ -347,7 +347,7 @@ contains
     implicit none
     integer , intent(in) :: n1,n2,n,i,j,klq,kuq
     real(rp), intent(in) :: a1(-1:1,n)
-    real(rp), intent(in) :: lp(n1,n2,n,-nbw:nbw),lm(n1,n2,n,-nbw:nbw)
+    real(rp), intent(in) :: lp(n1,n2,n,-klq:kuq),lm(n1,n2,n,-klq:kuq)
     complex(rp), intent(in) :: mu,bt
     complex(rp), intent(inout) :: psi(n1,n2,n),phi(n1,n2,n)
     complex(rp), intent(out) :: apsn
@@ -428,7 +428,7 @@ contains
     integer :: i,j
     real(rp) :: kk
     if(klq > nbw .or. kuq > nbw) call abort_run('init_pressure_lu: band wider than nbw')
-    allocate(lup(nkx,nkz,ny,-nbw:nbw),lum(nkx,nkz,ny,-nbw:nbw))
+    allocate(lup(nkx,nkz,ny,-klq:kuq),lum(nkx,nkz,ny,-klq:kuq))   ! band of B1 only, not nbw
     lup = 0._rp; lum = 0._rp
     !$acc enter data copyin(lup,lum)
     !$acc parallel loop gang vector collapse(2) default(present) private(kk) async(1)
@@ -997,7 +997,7 @@ contains
   !
   subroutine init_implicit
     implicit none
-    allocate(minv_i(36,nkx,nkz,3),hinv_i(4,nkx,nkz,3),vit(nkx,nkz,ny),cvec(nkx,nkz,ny),tw1(nkx,nkz,ny))
+    allocate(minv_i(36,nkx,nkz,rk_stages),hinv_i(4,nkx,nkz,rk_stages),vit(nkx,nkz,ny),cvec(nkx,nkz,ny),tw1(nkx,nkz,ny))
     minv_i = 0._rp; hinv_i = 0._rp; vit = 0._rp; cvec = 0._rp; tw1 = 0._rp
     !$acc enter data copyin(minv_i,hinv_i,vit,cvec,tw1)
     c_cached(:) = -1._rp
@@ -1503,7 +1503,7 @@ contains
     integer :: i,j,l
     real(rp) :: h(4)
     allocate(phv(nkx,nkz,ny),om(nkx,nkz,ny),wa(nkx,nkz,ny),wb(nkx,nkz,ny))
-    allocate(hinv_c(4,nkx,nkz,3),ginv_v(4,nkx,nkz,3),hinv_v(4,nkx,nkz))
+    allocate(hinv_c(4,nkx,nkz,rk_stages),ginv_v(4,nkx,nkz,rk_stages),hinv_v(4,nkx,nkz))
     phv = 0; om = 0; wa = 0; wb = 0; hinv_c = 0; ginv_v = 0; hinv_v = 0
     !$acc enter data copyin(phv,om,wa,wb,hinv_c,ginv_v,hinv_v)
     c_cached_vv(:) = -1._rp

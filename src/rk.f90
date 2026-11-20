@@ -330,8 +330,8 @@ contains
   !
   real(rp) function compute_dt()
     !
-    ! RK3 stability: |lambda dt| < sqrt(3) on the imaginary axis (advection) and
-    ! < 2.51 on the real axis (explicit diffusion)
+    ! RK3 stability: |lambda dt| < sqrt(3) on the imaginary axis (advection) and < 2.51 on the real axis
+    ! (explicit diffusion) with 3 stages; sqrt(8) and 2.79 with 4 stages (cfl, cfl_visc are absolute limits)
     !
     implicit none
     real(rp) :: cmax,kxm,kzm,dta,dtv,nmax
@@ -429,8 +429,8 @@ contains
     integer :: q,n
     real(rp) :: dtn,dtg,dtz,dtb,c,dpe,th
     t_stage = time
-    do q=1,3
-      if(q > 1) t_stage = t_stage + rk_bet(q-1)*dtcur   ! substage times t, t + 8/15 dt, t + 2/3 dt
+    do q=1,rk_stages
+      if(q > 1) t_stage = t_stage + rk_bet(q-1)*dtcur   ! substage times (3 stages: t, t + 8/15 dt, t + 2/3 dt)
       call tic(tm_nl)
       call nonlinear(q == 1,dtn)
       call toc(tm_nl)
@@ -496,7 +496,7 @@ contains
         call toc(tm_vsolve)
       end if
       if(forcing == 'cfr') then
-        if(q == 3) dpdx_applied = dpe
+        if(q == rk_stages) dpdx_applied = dpe
       else
         dpdx_applied = dpdx
       end if

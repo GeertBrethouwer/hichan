@@ -122,7 +122,7 @@ program hichan
     end if
     call tic(tm_stats)
     if(time >= tstats_start .and. iout_stats > 0) then
-      if(mod(istep,iout_stats) == 0) call accumulate_stats(u,v,w,s,1._rp/(rk_bet(3)*dtcur),dtcur*iout_stats)
+      if(mod(istep,iout_stats) == 0) call accumulate_stats(u,v,w,s,1._rp/(rk_bet(rk_stages)*dtcur),dtcur*iout_stats)
     end if
     if(iout_save_stats > 0) then
       if(mod(istep,iout_save_stats) == 0 .or. is_done) call write_stats(time)
@@ -174,9 +174,10 @@ contains
     b(1) = sp*(11+3*max(nscal,1))
     b(2) = ph*(4+ng)
     b(3) = sp*3 + 8_i8*(nbw+1)*nkx*nkz*ny + 8_i8*36*nkx*nkz   ! psi, phi, sx and the U factors uf
+    if(pres_lu_stored) b(3) = b(3) + 16_i8*(max(kl1,1)+max(ku1,1)+1)*nkx*nkz*ny  ! stored pressure LU factors
     b(4) = 0
-    if(visc_theta > 0._rp .and. ns_method /= 'vv') b(4) = b(4) + sp*3 + 8_i8*120*nkx*nkz
-    if(ns_method == 'vv')  b(4) = b(4) + sp*4 + 8_i8*28*nkx*nkz
+    if(visc_theta > 0._rp .and. ns_method /= 'vv') b(4) = b(4) + sp*3 + 8_i8*40*rk_stages*nkx*nkz
+    if(ns_method == 'vv')  b(4) = b(4) + sp*4 + 8_i8*(8*rk_stages+4)*nkx*nkz
     b(5) = 16_i8*(max(int(mx/2+1,i8)*nzA*nyA,int(mz,i8)*nyA*nkx) + max(int(nxh,i8)*nzA*nyA,int(nz,i8)*nyA*nkx))
     b(6) = tr_work_bytes
     b(7) = sum(b(1:6))
