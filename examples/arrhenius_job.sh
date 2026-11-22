@@ -25,25 +25,30 @@ export UCX_MEMTYPE_CACHE=n                           # Open MPI / UCX
 export NCCL_DEBUG=WARN                               # NCCL prints the reason if it fails
 # NCCL's libfabric (OFI) network plugin fails on Arrhenius with "NET/OFI Couldn't create domain ...
 # Function not implemented" -> "Failed to initialize any NET plugin" -> ncclCommInitRank error 5.
-# Single node: NCCL uses NVLink between the GPUs and does not need the plugin, so disable it:
-export NCCL_NET_PLUGIN=none
-export NCCL_NET=Socket
+# Single node: NCCL uses NVLink between the GPUs and does not need the plugin, so disable it with
+# NCCL_NET_PLUGIN=none and NCCL_NET=Socket (Socket is only NCCL's transport between nodes).
+# The site sets NCCL_NET_PLUGIN=.../libnccl-net-ofi.so and NCCL_NET="AWS Libfabric" again in every task,
+# after srun has copied this environment, so `export` here does not reach NCCL: the two are set on the srun
+# command line with env (NCCL_TASK_ENV). With several nodes this Socket setting works but is slow.
+NCCL_TASK_ENV="NCCL_NET_PLUGIN=none NCCL_NET=Socket"
 # Multi-node: NCCL needs a working OFI plugin for Slingshot (ask NSC which one; typically
 # FI_PROVIDER=cxi, NCCL_NET="AWS Libfabric", NCCL_CROSS_NIC=1), or set cudecomp_enable_nccl = .false.
-# in &parallel to use cuDecomp's (CUDA-aware) MPI backends only.
+# in &parallel to use cuDecomp's (CUDA-aware) MPI backends only. For the OFI plugin set NCCL_TASK_ENV="".
 env | grep -E '^(NCCL|FI)_' | sort
+echo "set in every task: ${NCCL_TASK_ENV:-(nothing)}"
 
 cd $SLURM_SUBMIT_DIR
 # The MPI of the NVIDIA HPC SDK (Open MPI/HPC-X) needs PMIx. With a plain srun/mpprun the tasks
 # start as independent MPI "singletons" ("No PMIx server was reachable ... singletons will be
 # started"), all use GPU 0 and cuDecomp fails in ncclCommInitRank. Check `srun --mpi=list` and use:
 # HiCHAN prints the GPU used by each rank; every rank must use a different GPU.
-srun --mpi=pmix $HICHAN/build/hichan
+srun --mpi=pmix env $NCCL_TASK_ENV $HICHAN/build/hichan
+# check what the tasks see:  srun -n 1 env $NCCL_TASK_ENV bash -c 'env | grep ^NCCL_NET'
 # if Slurm hands each task its own GPU (or the ranks end up on the same GPU), bind explicitly:
-#   srun --mpi=pmix --gpus-per-task=1 --gpu-bind=single:1 $HICHAN/build/hichan
+#   srun --mpi=pmix --gpus-per-task=1 --gpu-bind=single:1 env $NCCL_TASK_ENV $HICHAN/build/hichan
 # if NCCL still fails, set  cudecomp_enable_nccl = .false.  in &parallel (MPI backends only)
 # alternatives:
-#   mpirun -np $SLURM_NTASKS --map-by ppr:4:node $HICHAN/build/hichan   # mpirun of the MPI used to build
-#   mpprun $HICHAN/build/hichan                                       # only if HiCHAN was built with an
+#   mpirun -np $SLURM_NTASKS --map-by ppr:4:node env $NCCL_TASK_ENV $HICHAN/build/hichan   # MPI used to build
+#   mpprun env $NCCL_TASK_ENV $HICHAN/build/hichan                    # only if HiCHAN was built with an
 #                                                                     # MPI that mpprun recognises
 # A correct start prints the input namelist ONCE and "number of MPI processes: <SLURM_NTASKS>".

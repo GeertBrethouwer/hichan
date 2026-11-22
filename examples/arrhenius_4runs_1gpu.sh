@@ -25,9 +25,9 @@ EXE=$HOME/CaNS/run/cans
 export LD_LIBRARY_PATH=$HOME/CaNS/dependencies/cuDecomp/build/lib:$LD_LIBRARY_PATH
 
 export OMP_NUM_THREADS=1
-# NCCL is not needed between GPUs here (one rank per run); avoid the broken OFI network plugin
-export NCCL_NET_PLUGIN=none
-export NCCL_NET=Socket
+# NCCL is not needed between GPUs here (one rank per run); avoid the broken OFI network plugin.
+# The site sets NCCL_NET_PLUGIN=.../libnccl-net-ofi.so and NCCL_NET="AWS Libfabric" again in every task, after
+# srun has copied this environment, so they are set inside each task (in the bash -c below), not here.
 export NCCL_DEBUG=WARN
 
 cd $SLURM_SUBMIT_DIR
@@ -41,7 +41,8 @@ for i in 1 2 3 4; do
   # resources between the steps, so the four steps run at the same time on different GPUs)
   srun --exact --ntasks=1 --gpus=1 --cpus-per-task=72 --mpi=pmix \
        --chdir=$dir --output=log_slurm.out --error=log_slurm.err \
-       bash -c 'echo "$(hostname): CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; exec '"$EXE" &
+       bash -c 'export NCCL_NET_PLUGIN=none NCCL_NET=Socket
+                echo "$(hostname): CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; exec '"$EXE" &
   sleep 2                                         # stagger the start-ups a little
 done
 wait                                              # until all four simulations have finished
@@ -55,5 +56,5 @@ echo "all runs finished: $(date)"
 # (--mpi=none: each task is its own MPI "singleton", which is fine for one rank). Replace the
 # for loop and the wait by:
 #   srun --ntasks=4 --cpus-per-task=72 --mpi=none bash -c '
-#     i=$((SLURM_LOCALID+1)); export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
+#     i=$((SLURM_LOCALID+1)); export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID NCCL_NET_PLUGIN=none NCCL_NET=Socket
 #     cd run$i && mkdir -p data && exec '"$EXE"' > log_slurm.out 2> log_slurm.err'
