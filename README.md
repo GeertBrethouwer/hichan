@@ -337,7 +337,11 @@ built with (HiCHAN then also prints a warning).
 initialize any NET plugin` (then `cudecomp.cc:69 NCCL error (error code 5)`), NCCL's libfabric network plugin
 does not work in the job environment. On one node set `NCCL_NET_PLUGIN=none` and `NCCL_NET=Socket`
 (the GPUs communicate over NVLink); otherwise set `cudecomp_enable_nccl = .false.` or fix the plugin
-configuration (see `examples/arrhenius_job.sh`).
+configuration (see `examples/arrhenius_job.sh`). On Arrhenius the site sets `NCCL_NET_PLUGIN` (to its
+`libnccl-net-ofi.so`) and `NCCL_NET="AWS Libfabric"` again in every task, after `srun` has copied the job's
+environment, so `export` in the job script is not enough: set them on the `srun` line,
+`srun --mpi=pmix env NCCL_NET_PLUGIN=none NCCL_NET=Socket $HICHAN/build/hichan` (as the job scripts do).
+`NCCL_DEBUG=INFO` shows the plugin that NCCL loads (`NET/Plugin: Plugin name set by env to ...`).
 
 Run time: `export LD_LIBRARY_PATH=$PWD/dependencies/cuDecomp/build/lib:$LD_LIBRARY_PATH`, one MPI rank per GPU
 (4 per Arrhenius node). The process grid and the communication backend are autotuned by cuDecomp when
