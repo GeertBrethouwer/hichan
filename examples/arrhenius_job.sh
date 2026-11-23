@@ -33,14 +33,23 @@ export NCCL_DEBUG=WARN                               # NCCL prints the reason if
 # - several nodes: the site's settings (AWS OFI plugin, libfabric provider cxi, one Slingshot NIC per GPU).
 #   Tested on two nodes with FDCHAN's examples/arrhenius_nccl_test.sh: about 21 GB/s per GPU between the
 #   nodes; NCCL_NET=Socket gave 1.7 GB/s, so never use it on several nodes. Keep cudecomp_enable_nccl = .true.
-#   The same test: Open MPI works between the nodes with the site's settings (do not set OMPI_MCA_btl=^ofi).
+#
+# Open MPI, also chosen from the number of nodes (the site does not reset OMPI_MCA_* in the tasks):
+# - one node: Open MPI's libfabric (OFI) components crash in MPI_Init on Arrhenius (segmentation fault in
+#   fi_fabric, or "free(): invalid pointer" from opal_common_ofi_fi_domain), so they are switched off and MPI
+#   uses shared memory. Only the start-up and small messages go through MPI when cuDecomp uses NCCL.
+# - several nodes: the site's settings. With the libfabric components off MPI_Init fails between the nodes
+#   (tested on two nodes with FDCHAN's examples/arrhenius_nccl_test.sh).
 NNODES=${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-1}}
 if [ "$NNODES" -eq 1 ]; then
+  export OMPI_MCA_btl=^ofi
+  export OMPI_MCA_mtl=^ofi
   NCCL_TASK_ENV="NCCL_NET_PLUGIN=none NCCL_NET=Socket"
 else
+  unset OMPI_MCA_btl OMPI_MCA_mtl
   NCCL_TASK_ENV=""
 fi
-env | grep -E '^(NCCL|FI)_' | sort
+env | grep -E '^(NCCL|FI|OMPI_MCA)_' | sort
 echo "$NNODES node(s); set in every task: ${NCCL_TASK_ENV:-(nothing, site NCCL settings)}"
 
 cd $SLURM_SUBMIT_DIR

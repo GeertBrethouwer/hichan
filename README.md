@@ -337,7 +337,9 @@ environment, so `export` in the job script is not enough: set them on the `srun`
 `srun --mpi=pmix env NCCL_NET_PLUGIN=none NCCL_NET=Socket $HICHAN/build/hichan` (as the job scripts do for one
 node). On several nodes keep the site's settings: NCCL then uses the libfabric plugin over Slingshot (about
 21 GB/s per GPU between two nodes, against 1.7 GB/s with `NCCL_NET=Socket`; measured with FDCHAN's
-`examples/arrhenius_nccl_test.sh`).
+`examples/arrhenius_nccl_test.sh`). On one node Open MPI's libfabric (OFI) components crash in `MPI_Init`
+(segmentation fault in `fi_fabric`): the job script sets `OMPI_MCA_btl=^ofi` and `OMPI_MCA_mtl=^ofi` for one-node
+jobs only (between nodes MPI needs them).
 `NCCL_DEBUG=INFO` shows the plugin that NCCL loads (`NET/Plugin: Plugin name set by env to ...`).
 
 Run time: `export LD_LIBRARY_PATH=$PWD/dependencies/cuDecomp/build/lib:$LD_LIBRARY_PATH`, one MPI rank per GPU
