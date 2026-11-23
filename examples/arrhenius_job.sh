@@ -23,19 +23,25 @@ export OMP_NUM_THREADS=1
 export MPICH_GPU_SUPPORT_ENABLED=1                   # Cray MPICH
 export UCX_MEMTYPE_CACHE=n                           # Open MPI / UCX
 export NCCL_DEBUG=WARN                               # NCCL prints the reason if it fails
-# NCCL's libfabric (OFI) network plugin fails on Arrhenius with "NET/OFI Couldn't create domain ...
-# Function not implemented" -> "Failed to initialize any NET plugin" -> ncclCommInitRank error 5.
-# Single node: NCCL uses NVLink between the GPUs and does not need the plugin, so disable it with
-# NCCL_NET_PLUGIN=none and NCCL_NET=Socket (Socket is only NCCL's transport between nodes).
-# The site sets NCCL_NET_PLUGIN=.../libnccl-net-ofi.so and NCCL_NET="AWS Libfabric" again in every task,
-# after srun has copied this environment, so `export` here does not reach NCCL: the two are set on the srun
-# command line with env (NCCL_TASK_ENV). With several nodes this Socket setting works but is slow.
-NCCL_TASK_ENV="NCCL_NET_PLUGIN=none NCCL_NET=Socket"
-# Multi-node: NCCL needs a working OFI plugin for Slingshot (ask NSC which one; typically
-# FI_PROVIDER=cxi, NCCL_NET="AWS Libfabric", NCCL_CROSS_NIC=1), or set cudecomp_enable_nccl = .false.
-# in &parallel to use cuDecomp's (CUDA-aware) MPI backends only. For the OFI plugin set NCCL_TASK_ENV="".
+# NCCL network, chosen from the number of nodes of the job. The site sets NCCL_NET_PLUGIN=.../libnccl-net-ofi.so
+# and NCCL_NET="AWS Libfabric" in every task, after srun has copied this environment, so `export` here does not
+# reach NCCL: a different choice is given on the srun command line with env (NCCL_TASK_ENV).
+# - one node: NCCL uses NVLink between the GPUs and needs no network. The site's libfabric (OFI) plugin failed in
+#   single-node runs ("NET/OFI Couldn't create domain ... Function not implemented" -> "Failed to initialize any
+#   NET plugin" -> ncclCommInitRank error 5), so it is switched off: NCCL_NET_PLUGIN=none NCCL_NET=Socket
+#   (Socket is only NCCL's transport between nodes).
+# - several nodes: the site's settings (AWS OFI plugin, libfabric provider cxi, one Slingshot NIC per GPU).
+#   Tested on two nodes with FDCHAN's examples/arrhenius_nccl_test.sh: about 21 GB/s per GPU between the
+#   nodes; NCCL_NET=Socket gave 1.7 GB/s, so never use it on several nodes. Keep cudecomp_enable_nccl = .true.
+#   The same test: Open MPI works between the nodes with the site's settings (do not set OMPI_MCA_btl=^ofi).
+NNODES=${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-1}}
+if [ "$NNODES" -eq 1 ]; then
+  NCCL_TASK_ENV="NCCL_NET_PLUGIN=none NCCL_NET=Socket"
+else
+  NCCL_TASK_ENV=""
+fi
 env | grep -E '^(NCCL|FI)_' | sort
-echo "set in every task: ${NCCL_TASK_ENV:-(nothing)}"
+echo "$NNODES node(s); set in every task: ${NCCL_TASK_ENV:-(nothing: the site's NCCL settings)}"
 
 cd $SLURM_SUBMIT_DIR
 # The MPI of the NVIDIA HPC SDK (Open MPI/HPC-X) needs PMIx. With a plain srun/mpprun the tasks
