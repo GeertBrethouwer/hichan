@@ -41,7 +41,7 @@ else
   NCCL_TASK_ENV=""
 fi
 env | grep -E '^(NCCL|FI)_' | sort
-echo "$NNODES node(s); set in every task: ${NCCL_TASK_ENV:-(nothing: the site's NCCL settings)}"
+echo "$NNODES node(s); set in every task: ${NCCL_TASK_ENV:-(nothing, site NCCL settings)}"
 
 cd $SLURM_SUBMIT_DIR
 # The MPI of the NVIDIA HPC SDK (Open MPI/HPC-X) needs PMIx. With a plain srun/mpprun the tasks
