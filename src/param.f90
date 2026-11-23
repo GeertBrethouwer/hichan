@@ -37,7 +37,7 @@ module mod_param
   !
   ! &time
   !
-  integer  :: nstep = 1000
+  integer  :: nstep = 1000   ! number of time steps of this run (counted from the start or restart step)
   real(rp) :: tmax  = huge(1._rp)
   real(rp) :: wall_time_max = huge(1._rp)  ! in seconds; the run stops (with a restart file) before this
   real(rp) :: dt    = 1.e-5_rp              ! fixed time step, or the first step of an adaptive run
@@ -218,7 +218,7 @@ contains
       else
         write(*,fr) 'adaptive time step, cfl, cfl_visc',cfl,cfl_visc
       end if
-      write(*,fi) 'nstep',nstep
+      write(*,fi) 'nstep (steps of this run)',nstep
       if(tmax < huge(1._rp)) write(*,fr) 'tmax',tmax
       write(*,f1) 'initial condition',trim(init_type)
       if(trim(init_type) == 'largescale') then

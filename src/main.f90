@@ -100,7 +100,7 @@ program hichan
     call rk_step(time,dtcur)
     call toc(tm_rk)
     istep = istep+1
-    is_done = (istep >= nstep) .or. (time >= tmax)
+    is_done = (istep-istep0 >= nstep) .or. (time >= tmax)   ! nstep: steps of this run (also after a restart)
     if(mod(istep,iout_log) == 0 .or. is_done) then
       call tic(tm_log)
       divm = divergence_max(u,v,w,tmp1)

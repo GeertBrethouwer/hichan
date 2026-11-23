@@ -60,7 +60,7 @@
 !------------------------------------------------------------------------------------------------------
 &time                                  ! time integration (low-storage RK3)
 !------------------------------------------------------------------------------------------------------
-  nstep         = 200000               ! maximum number of time steps                                 [1000]
+  nstep         = 200000               ! number of time steps of this run (also after a restart)      [1000]
   tmax          = 1500.                ! stop when this simulation time is reached                    [huge]
   wall_time_max = 85000.               ! stop (writing a restart file) after this wall-clock time [s] [huge]
   fixed_dt      = .false.              ! .true.: constant dt; .false.: adaptive dt from cfl, cfl_visc [.false.]
