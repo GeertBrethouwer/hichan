@@ -63,6 +63,12 @@ module mod_param
   character(len=256) :: data_dir = 'data'
   integer  :: iout_log = 10, iout_stats = 10, iout_save_stats = 1000, iout_restart = 5000, iout_field = 0
   real(rp) :: tstats_start = 0._rp
+  ! numbered restart files (time samples, e.g. for spectra): <samples_dir>/restart_t<time>.bin/.hdr every iout_samples
+  ! steps and/or every tout_samples of simulation time, from tsamples_start on (0: off); samples_dir default
+  ! <data_dir>/samples
+  integer  :: iout_samples = 0
+  real(rp) :: tout_samples = 0._rp, tsamples_start = 0._rp
+  character(len=256) :: samples_dir = ''
   integer  :: mode_log_kx = -1, mode_log_kz = 0 ! log the amplitude of one Fourier mode (e.g. for TS waves)
   logical  :: timing = .false.       ! timers: report at the end, time per step in timing_steps.dat
   logical  :: timing_sync = .true.   ! timers wait for the GPU (exact attribution, small overhead)
@@ -124,6 +130,7 @@ contains
     namelist /time/ nstep,tmax,wall_time_max,dt,fixed_dt,dt_max,dt_growth,cfl,cfl_visc
     namelist /init/ init_type,init_amp,init_noise,ls_nmin,ls_nmax,init_seed,mode_file,mode_kx,mode_kz,restart_file,reset_time
     namelist /output/ data_dir,iout_log,iout_stats,iout_save_stats,iout_restart,iout_field,tstats_start, &
+                      iout_samples,tout_samples,tsamples_start,samples_dir, &
                       mode_log_kx,mode_log_kz,timing,timing_sync
     namelist /scalars/ nscal,pr,scal_theta,sbc_bot,sbc_top,sval_bot,sval_top,ssrc_const,ssrc_u,sinit,scal_form
     namelist /buoyancy/ gravity,ri
@@ -164,6 +171,8 @@ contains
     if(all(transpose_prec /= ['double','single'])) call abort_run("transpose_prec must be 'double' or 'single'")
     if(all(scal_form /= ['advective ','divergence','skew      '])) &
       call abort_run("scal_form must be 'advective', 'divergence' or 'skew'")
+    if(iout_samples < 0 .or. tout_samples < 0._rp) call abort_run('iout_samples, tout_samples must be >= 0')
+    if(len_trim(samples_dir) == 0) samples_dir = trim(data_dir)//'/samples'
     nxh = nx/2
     if(dealias) then
       mx = 3*nx/2
@@ -233,6 +242,12 @@ contains
           ', top ',sbc_top(n),' = ',sval_top(n),', Ri = ',ri(n)
       end do
       if(is_buoyant) write(*,fr) 'gravity direction (unit vector)',gvec
+      if(iout_samples > 0 .or. tout_samples > 0._rp) then
+        write(*,f1) 'time samples (restart_t<time>) in',trim(samples_dir)
+        if(iout_samples > 0) write(*,fi) '  every ... steps',iout_samples
+        if(tout_samples > 0._rp) write(*,fr) '  every ... time units',tout_samples
+        write(*,fr) '  from t =',tsamples_start
+      end if
       if(timing) write(*,f1) 'timers (timing_report.txt etc.)',merge('on, GPU-synchronised','on                  ', &
                                                                      timing_sync)
       write(*,'(a)') ' ===================================================================================='
