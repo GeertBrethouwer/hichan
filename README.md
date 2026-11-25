@@ -392,7 +392,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
   a restarted run continues with the next multiple (no duplicate at its start); `iout_samples` counts `istep`, which
   continues over restarts. Point `samples_dir` of a chain of jobs to one directory (default `<data_dir>/samples`).
   Each sample has the size of `restart.bin`: choose the interval with the disk quota in mind. Use them for restarts
-  (`restart_file = 'data/samples/restart_t000123.4560'`) or for spectra (`rsspec` of the converter repository).
+  (`restart_file = 'data/samples/restart_t000123.4560'`) or for spectra (`rsspec` of the [converter_and_spectra](https://github.com/GeertBrethouwer/converter_and_spectra) repository).
 * `fld_NNNNNNN_*.bin` + `.xmf`: physical fields on the dealiased grid, readable with ParaView/VisIt.
 * With `timing = .true.` (in `&output`):
   * `timing_report.txt` (also printed at the end of the run): the wall-clock time spent in each part of the
