@@ -367,7 +367,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
 | `&time` | `nstep` (number of steps of this run, counted from the start or the restart step), `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
-| `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
+| `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `iout_samples`, `tout_samples`, `tsamples_start`, `samples_dir` (time samples, see Output), `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
 | `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
@@ -386,6 +386,13 @@ comment, items that are not given keep their defaults, and per-scalar items are 
   and per scalar S, ⟨s′s′⟩, ⟨u′s′⟩, ⟨v′s′⟩, ⟨w′s′⟩. `tools/plot_stats.py` converts them to wall units.
 * `restart.bin` / `restart.hdr`: spectral fields (global `(nx/2, nz, ny)` complex arrays), independent of the
   number of ranks.
+* `samples/restart_t<time>.bin` / `.hdr` (with `iout_samples` or `tout_samples` in `&output`): restart files kept
+  as time samples, e.g. `restart_t000123.4560` (the names sort in time; the same names as FDCHAN's samples). With
+  `tout_samples` a sample is written at the first step at or after each multiple tsamples_start + k·tout_samples, and
+  a restarted run continues with the next multiple (no duplicate at its start); `iout_samples` counts `istep`, which
+  continues over restarts. Point `samples_dir` of a chain of jobs to one directory (default `<data_dir>/samples`).
+  Each sample has the size of `restart.bin`: choose the interval with the disk quota in mind. Use them for restarts
+  (`restart_file = 'data/samples/restart_t000123.4560'`) or for spectra (`rsspec` of the converter repository).
 * `fld_NNNNNNN_*.bin` + `.xmf`: physical fields on the dealiased grid, readable with ParaView/VisIt.
 * With `timing = .true.` (in `&output`):
   * `timing_report.txt` (also printed at the end of the run): the wall-clock time spent in each part of the

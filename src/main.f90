@@ -27,6 +27,7 @@ program hichan
   integer :: ierr,istep,istep0,ilog,n,nf
   real(rp) :: time,dtcur,divm,t0,t1,tstep,twall0
   logical :: is_done,is_stop
+  integer(i8) :: last_k
   character(len=8), allocatable :: names(:)
   character(len=4) :: cs
   !
@@ -92,6 +93,14 @@ program hichan
   !
   ! time integration
   !
+  !
+  ! numbered restart files (time samples): with tout_samples at the first step at or after each multiple
+  ! tsamples_start + k*tout_samples; a restarted run continues with the next multiple
+  !
+  last_k = -1
+  if(tout_samples > 0._rp) last_k = floor((time-tsamples_start)/tout_samples + 1.e-9_rp, i8)
+  if(myid == 0 .and. (iout_samples > 0 .or. tout_samples > 0._rp)) &
+    call execute_command_line('mkdir -p '//trim(samples_dir))
   is_done = .false.
   t0 = MPI_WTIME()
   call timing_start
@@ -134,6 +143,7 @@ program hichan
     if(iout_field > 0) then
       if(mod(istep,iout_field) == 0) call output_fields()
     end if
+    if(sample_due()) call write_sample()
     call toc(tm_io)
     call timing_step(istep,time,dtcur,is_done)
   end do
@@ -238,4 +248,30 @@ contains
     end do
     call write_xdmf(istep,time,names,yg)
   end subroutine output_fields
+  !
+  logical function sample_due()
+    ! a numbered restart file at this step? (iout_samples: steps of istep; tout_samples: next multiple of the time)
+    integer(i8) :: k
+    sample_due = .false.
+    if(time < tsamples_start - 1.e-12_rp) return
+    if(iout_samples > 0) sample_due = (mod(istep,iout_samples) == 0)
+    if(tout_samples > 0._rp) then
+      k = floor((time-tsamples_start)/tout_samples + 1.e-9_rp, i8)
+      if(k > last_k) then
+        last_k = k
+        sample_due = .true.
+      end if
+    end if
+  end function sample_due
+  !
+  subroutine write_sample
+    ! <samples_dir>/restart_t<time>.bin/.hdr, named by the time (as FDCHAN: restart_t000123.4560)
+    character(len=16) :: ct
+    integer(i8) :: it
+    it = nint(time*1.e4_rp, i8)
+    write(ct,'(i6.6,a,i4.4)') it/10000, '.', mod(it,10000_i8)
+    call write_restart(trim(samples_dir)//'/restart_t'//trim(ct),time,istep,dtcur,u,v,w,s)
+    if(myid == 0) write(*,'(a,a,a,es13.6,a,i0,a)') ' sample ',trim(samples_dir)//'/restart_t'//trim(ct), &
+                                                    ' (t = ',time,', step ',istep,')'
+  end subroutine write_sample
 end program hichan
