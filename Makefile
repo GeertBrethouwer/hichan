@@ -74,13 +74,18 @@ else
   LIBS   += $(FFTW_LIB)
 endif
 
-.PHONY: all clean ygrid
+.PHONY: all clean ygrid mms
 all: $(EXE)
 
 # stand-alone tool: wall-normal grid y_j, dy_j (and y+, dy+) for given ny, grid type, alpha
 ygrid: $(BUILDDIR)/ygrid
 $(BUILDDIR)/ygrid: tools/ygrid.f90 | $(BUILDDIR)
 	gfortran -O2 $< -o $@ || $(FC) -O2 $< -o $@
+
+# manufactured-solution test (tests/mms.f90, see tests/README_MMS.md); same flags and libraries as hichan
+mms: $(BUILDDIR)/mms
+$(BUILDDIR)/mms: tests/mms.f90 $(DZOBJS) $(filter-out $(BUILDDIR)/main.o,$(OBJS))
+	$(FC) $(FFLAGS) $(DEFINES) $(INCS) $< $(DZOBJS) $(filter-out $(BUILDDIR)/main.o,$(OBJS)) $(LIBS) -o $@
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)

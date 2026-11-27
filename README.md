@@ -8,7 +8,9 @@ HiCHAN solves the incompressible Navier–Stokes equations in a plane channel, t
 
 * **x, z (streamwise, spanwise):** Fourier series, pseudo-spectral nonlinear terms, 3/2-rule dealiasing.
 * **y (wall-normal):** collocated compact finite differences on an arbitrary (e.g. tanh-stretched) grid, with
-  the (3-4-3) fourth-order or (3-5-6-5-3) sixth-order schemes of the paper. Coefficients are computed directly
+  the (3-4-3) fourth-order or (3-5-6-5-3) sixth-order schemes of the paper, or (`fd_order = 8`) an eighth-order
+  scheme: tridiagonal with a 7-point right-hand side, explicit one-sided wall rows (5 points for D1, 6 for D2) and
+  tridiagonal rows 2–3 with 4-point right-hand sides (the scheme of FDCHAN). Coefficients are computed directly
   on the non-uniform grid. First and second derivatives are both compact (`A1 f' = B1 f`, `A2 f'' = B2 f`).
 * **Pressure:** influence-matrix method. Continuity is satisfied exactly at **every** grid point, including the
   walls, so the discrete divergence is at round-off level (1e-15 to 1e-10, depending on grid and resolution).
@@ -17,7 +19,8 @@ HiCHAN solves the incompressible Navier–Stokes equations in a plane channel, t
   Mathematics 9 (2021) 756 (Kim–Moin–Moser formulation for φ = ∇²v and ω_y; SMR RK3 with implicit viscous
   terms, Eqs. 30–32), on the same compact finite differences, FFTs, decomposition, scalars and buoyancy. See
   *Velocity–vorticity option* below.
-* **Time:** low-storage 3-stage RK3 (Table 1 of the paper). The viscous terms are either explicit (Appendix B.1,
+* **Time:** low-storage 3-stage RK3 (Table 1 of the paper), or with `rk_stages = 4` the 4-stage third-order
+  scheme of the SIMSON user guide (Chevalier et al. 2007, Table 5.1; see PERF.md). The viscous terms are either explicit (Appendix B.1,
   `visc_theta = 0`, the default and the variant the paper recommends for channel flow, Sec. 6) or implicit with
   the θ-method (Appendix B.2, `visc_theta > 0`, e.g. 0.5 = Crank–Nicolson). Scalar diffusion uses the same
   θ-method (`scal_theta`, default 0.5), or explicit RK3 when θ = 0.
@@ -133,7 +136,10 @@ The constant-flow-rate correction uses the implicit response `L⁻¹·1` of the 
 Dirichlet (`s = g`) or Neumann (`D1 s = g`) walls, where `c = θ β_q Δt/(Re Pr)`. Premultiplying by `A2` couples
 the unknown wall values of the operator into the first interior rows. This is the boundary error that the paper
 corrects with σ, and it is corrected here by superposition in the same way. No iteration is needed, because there
-is no pressure coupling. The explicit part `(1−θ)` and the right-hand side follow Eq. (13).
+is no pressure coupling. The banded matrix and the right-hand sides of the homogeneous problems are real, so one
+complex banded solve gives two homogeneous solutions: a scalar costs two banded solves per wavenumber pair and
+substep with Dirichlet walls, three with a Neumann wall. With explicit diffusion (θ = 0) only the wall values
+are set. The explicit part `(1−θ)` and the right-hand side follow Eq. (13).
 
 **Nonlinear terms.** Two forms are available:
 
@@ -363,14 +369,14 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 
 | namelist | contents |
 |---|---|
-| `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4 or 6), `dealias` |
-| `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol` |
+| `&grid` | `nx, nz` (Fourier modes, even), `ny` (points incl. walls), `lx, lz`, `grid_type` (`tanh`/`uniform`/`file`), `grid_alpha` (α_s of Eq. 41), `grid_file`, `fd_order` (4, 6 or 8), `dealias` |
+| `&physics` | `re` (U h/ν), `forcing` (`cfr`/`cpg`), `ubulk`, `dpdx`, `ns_method` (`im`: Lenaers et al. 2014, influence matrix; `vv`: velocity–vorticity, Lluesma-Rodríguez et al. 2021), `vv_neumann` (`explicit`/`compact`), `nl_form` (`rotational`/`advective`), `visc_theta` (0 = explicit, B.1; > 0 = implicit, B.2), `impl_maxit`, `impl_tol`, `pres_lu_stored` (pressure matrices factorised once at start-up, +40 B per point, +72 with `fd_order = 8`; see PERF.md) |
 | `&time` | `nstep` (number of steps of this run, counted from the start or the restart step), `tmax`, `wall_time_max` (s), `fixed_dt`, `dt` (fixed dt, or the first step: default 1e-5), `dt_max`, `dt_growth` (max. growth of the adaptive dt per step, default 1.1), `cfl`, `cfl_visc` |
 | `&init` | `init_type` (`laminar`/`noise`/`largescale`/`mode`/`restart`), `init_amp`, `init_noise`, `ls_nmin`, `ls_nmax` (`largescale`: wavelengths L/ls_nmax … L/ls_nmin in x and z, plus small-scale noise), `init_seed`, `mode_file`, `mode_kx`, `mode_kz`, `restart_file`, `reset_time` |
-| `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `iout_samples`, `tout_samples`, `tsamples_start`, `samples_dir` (time samples, see Output), `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
+| `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `stats_restart`, `iout_samples`, `tout_samples`, `tsamples_start`, `samples_dir` (time samples, see Output), `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
-| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem` |
+| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem`, `fft_2d` |
 
 ## Output (in `data_dir`)
 
@@ -386,13 +392,20 @@ comment, items that are not given keep their defaults, and per-scalar items are 
   and per scalar S, ⟨s′s′⟩, ⟨u′s′⟩, ⟨v′s′⟩, ⟨w′s′⟩. `tools/plot_stats.py` converts them to wall units.
 * `restart.bin` / `restart.hdr`: spectral fields (global `(nx/2, nz, ny)` complex arrays), independent of the
   number of ranks.
+  They are written under temporary names and renamed only after every write succeeded, so a job that is killed
+  while writing, or a full disk, leaves the previous restart file intact (a warning is printed). This needs room
+  for two restart files for a moment.
+* `restart.stats`: the accumulated sums of the statistics, written together with the restart file. A run started
+  with `init_type = 'restart'` continues the same time average, so `stats.dat` covers the whole chain of jobs.
+  Set `stats_restart = .false.` (or `reset_time = .true.`) to start the averaging anew.
 * `samples/restart_t<time>.bin` / `.hdr` (with `iout_samples` or `tout_samples` in `&output`): restart files kept
   as time samples, e.g. `restart_t000123.4560` (the names sort in time; the same names as FDCHAN's samples). With
   `tout_samples` a sample is written at the first step at or after each multiple tsamples_start + k·tout_samples, and
   a restarted run continues with the next multiple (no duplicate at its start); `iout_samples` counts `istep`, which
   continues over restarts. Point `samples_dir` of a chain of jobs to one directory (default `<data_dir>/samples`).
-  Each sample has the size of `restart.bin`: choose the interval with the disk quota in mind. Use them for restarts
-  (`restart_file = 'data/samples/restart_t000123.4560'`) or for spectra (`rsspec` of the [converter_and_spectra](https://github.com/GeertBrethouwer/converter_and_spectra) repository).
+  Each sample has the size of `restart.bin`: choose the interval with the disk quota in mind. Each sample also has
+  its `.stats` file (the sums of the statistics at that time), so a restart from it continues the averages. Use
+  them for restarts (`restart_file = 'data/samples/restart_t000123.4560'`) or for spectra (`rsspec` of the [converter_and_spectra](https://github.com/GeertBrethouwer/converter_and_spectra) repository).
 * `fld_NNNNNNN_*.bin` + `.xmf`: physical fields on the dealiased grid, readable with ParaView/VisIt.
 * With `timing = .true.` (in `&output`):
   * `timing_report.txt` (also printed at the end of the run): the wall-clock time spent in each part of the

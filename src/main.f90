@@ -14,7 +14,7 @@ program hichan
   use mod_types
   use mod_param
   use mod_decomp
-  use mod_compact, only: init_grid,init_compact,yg,kl1,ku1,kl2,ku2,nc1,ncn,lam2max
+  use mod_compact, only: init_grid,init_compact,yg,kl1,ku1,kl2,ku2,nc1,ncn,lam2max,nbw
   use mod_fields
   use mod_fft
   use mod_ysolve
@@ -26,7 +26,7 @@ program hichan
   implicit none
   integer :: ierr,istep,istep0,ilog,n,nf
   real(rp) :: time,dtcur,divm,t0,t1,tstep,twall0
-  logical :: is_done,is_stop
+  logical :: is_done,is_stop,is_ok
   integer(i8) :: last_k
   character(len=8), allocatable :: names(:)
   character(len=4) :: cs
@@ -36,13 +36,13 @@ program hichan
   call MPI_COMM_RANK(MPI_COMM_WORLD,myid,ierr)
   call read_input(myid)
   call init_decomp
-  call memory_estimate()
   call init_grid(ny,grid_type,grid_alpha,grid_file)
   call init_compact(ny,fd_order)
+  call memory_estimate()               ! after init_compact: needs the bandwidths kl1, ku1
   call alloc_fields
   call init_fft(up)
   call init_ysolve
-  if(visc_theta > 0._rp) call init_implicit
+  if(visc_theta > 0._rp .and. ns_method /= 'vv') call init_implicit
   if(ns_method == 'vv') call init_vv
   call init_rk
   call init_stats
@@ -69,6 +69,8 @@ program hichan
     call read_restart(trim(restart_file),time,istep,dtcur,u,v,w,s)
     if(reset_time) then
       time = 0._rp; istep = 0
+    else if(stats_restart) then
+      call read_stats_state(trim(restart_file))
     end if
   else
     call init_fields(u,v,w,s)
@@ -129,7 +131,7 @@ program hichan
     end if
     call tic(tm_stats)
     if(time >= tstats_start .and. iout_stats > 0) then
-      if(mod(istep,iout_stats) == 0) call accumulate_stats(u,v,w,s,1._rp/(rk_bet(3)*dtcur),dtcur*iout_stats)
+      if(mod(istep,iout_stats) == 0) call accumulate_stats(u,v,w,s,1._rp/(rk_bet(rk_stages)*dtcur),dtcur*iout_stats)
     end if
     if(iout_save_stats > 0) then
       if(mod(istep,iout_save_stats) == 0 .or. is_done) call write_stats(time)
@@ -137,8 +139,11 @@ program hichan
     call toc(tm_stats)
     call tic(tm_io)
     if(iout_restart > 0) then
-      if(mod(istep,iout_restart) == 0 .or. is_done) &
-        call write_restart(trim(data_dir)//'/restart',time,istep,dtcur,u,v,w,s)
+      if(mod(istep,iout_restart) == 0 .or. is_done) then
+        call write_restart(trim(data_dir)//'/restart',time,istep,dtcur,u,v,w,s,is_ok)
+        ! the sums of the statistics belong to this restart file: only written together with it
+        if(is_ok) call write_stats_state(trim(data_dir)//'/restart')
+      end if
     end if
     if(iout_field > 0) then
       if(mod(istep,iout_field) == 0) call output_fields()
@@ -178,10 +183,11 @@ contains
     if(trim(nl_form) == 'rotational') ng = 3
     b(1) = sp*(11+3*max(nscal,1))
     b(2) = ph*(4+ng)
-    b(3) = sp*5 + 8_i8*36*nkx*nkz
+    b(3) = sp*3 + 8_i8*(max(ku1,ku2,1)+1)*nkx*nkz*ny + 8_i8*36*nkx*nkz   ! psi, phi, sx and the U factors uf
+    if(pres_lu_stored) b(3) = b(3) + 16_i8*(max(kl1,1)+max(ku1,1)+1)*nkx*nkz*ny  ! stored pressure LU factors
     b(4) = 0
-    if(visc_theta > 0._rp) b(4) = b(4) + sp*3 + 8_i8*120*nkx*nkz
-    if(ns_method == 'vv')  b(4) = b(4) + sp*4 + 8_i8*28*nkx*nkz
+    if(visc_theta > 0._rp .and. ns_method /= 'vv') b(4) = b(4) + sp*3 + 8_i8*40*rk_stages*nkx*nkz
+    if(ns_method == 'vv')  b(4) = b(4) + sp*4 + 8_i8*(8*rk_stages+4)*nkx*nkz
     b(5) = 16_i8*(max(int(mx/2+1,i8)*nzA*nyA,int(mz,i8)*nyA*nkx) + max(int(nxh,i8)*nzA*nyA,int(nz,i8)*nyA*nkx))
     b(6) = tr_work_bytes
     b(7) = sum(b(1:6))
@@ -229,7 +235,7 @@ contains
   subroutine log_line_stdout
     write(*,'(a,i9,a,es12.5,a,es10.3,a,es12.5,a,es10.3)',advance='no') ' step ',istep,'  t = ',time, &
                                                          '  dt = ',dtcur,'  dpdx = ',dpdx_applied,'  div = ',divm
-    if(visc_theta > 0._rp) write(*,'(a,i3,a,es9.2)',advance='no') '  impl. it. ',impl_nit,' dv ',impl_res
+    if(visc_theta > 0._rp .and. ns_method /= 'vv') write(*,'(a,i3,a,es9.2)',advance='no') '  impl. it. ',impl_nit,' dv ',impl_res
     write(*,*)
   end subroutine log_line_stdout
   !
@@ -270,7 +276,9 @@ contains
     integer(i8) :: it
     it = nint(time*1.e4_rp, i8)
     write(ct,'(i6.6,a,i4.4)') it/10000, '.', mod(it,10000_i8)
-    call write_restart(trim(samples_dir)//'/restart_t'//trim(ct),time,istep,dtcur,u,v,w,s)
+    call write_restart(trim(samples_dir)//'/restart_t'//trim(ct),time,istep,dtcur,u,v,w,s,is_ok)
+    ! the sums of the statistics with the sample (as with restart): a restart from it continues the averages
+    if(is_ok) call write_stats_state(trim(samples_dir)//'/restart_t'//trim(ct))
     if(myid == 0) write(*,'(a,a,a,es13.6,a,i0,a)') ' sample ',trim(samples_dir)//'/restart_t'//trim(ct), &
                                                     ' (t = ',time,', step ',istep,')'
   end subroutine write_sample

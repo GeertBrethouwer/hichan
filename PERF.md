@@ -21,6 +21,16 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
 
 - **`cfl`:** RK3 is stable up to √3 ≈ 1.73. Going from 1.0 to 1.5 means a third fewer steps; around 1.5 still
   leaves some margin. `cfl_visc` (limit 2.51) can go up to about 2.
+- **`rk_stages = 4`** (the 4-stage third-order RK3 of SIMSON). Its limits are √8 = 2.83 for `cfl` and 2.79 for
+  `cfl_visc`, at 4/3 of the cost of a step.
+  - **When advection sets dt:** 2.83/4 = 0.71 per stage against 1.73/3 = 0.58, so about 20 % less work per unit
+    time. Use e.g. `cfl = 2.4`.
+  - **When explicit diffusion sets dt:** 2.79/4 = 0.70 against 2.51/3 = 0.84, so 17 % more work. Keep 3 stages
+    or use `visc_theta = 0.5`.
+  - **Accuracy:** its error at the same dt is much smaller (MMS: 8× for the velocity; FDCHAN turbulent case:
+    35–500×).
+  - **With `ns_method = 'vv'`:** the viscous terms are Crank–Nicolson in each stage, which is 2nd order and less
+    accurate than the Spalart–Moser–Rogers coefficients of the 3-stage scheme.
 - **Wall resolution:** with explicit viscous terms the time-step limit scales with dy_wall². Clustering points
   more than needed at the wall costs a lot. Use `build/ygrid ny tanh alpha Re_tau` (`make ygrid`) to choose `ny`
   and `grid_alpha` for dy⁺_wall ≈ 0.5–1 and dy⁺_centre ≲ 5–9. For example, 193 points with α = 4 at Re_τ = 395
@@ -35,6 +45,32 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
   diffusion limit dominates dt. For Pr ≳ 0.7, `scal_theta = 0` (explicit) is cheaper and doesn't reduce dt.
   Dirichlet walls are cheaper than Neumann walls (fewer solves per step).
 - **`fixed_dt = .false.`**, with a sensible `dt_max`.
+
+## 2b. `fd_order = 8`: fewer wall-normal points
+
+The 8th-order scheme has 4th-order wall closures instead of 3rd-order ones, and these set the accuracy of the
+pressure step. The manufactured-solution test (tests/README_MMS.md) gives:
+
+| quantity, ny = 129 | `fd_order = 6` | `fd_order = 8` |
+|---|---|---|
+| pressure step (velocity) | 2.6e-7, 4th order | 8.6e-9, 5th order |
+| forced time-dependent run, error of v | 2.7e-7, 4th order | 9.2e-9, 5th order |
+
+TS wave (Re = 5000), error of ω_i:
+
+| ny | `fd_order = 6` | `fd_order = 8` |
+|---|---|---|
+| 65 | 3.4e-7 | 1.5e-7 |
+| 97 | | 2.1e-9 |
+
+Cost on one CPU core (64 × 129 × 64, one scalar): 18–26 % more per step.
+
+- **Pressure step:** +50 %. The band of B1 ± k A1 grows from 3 to 4 because of the 5-point wall row.
+- **Implicit scalar solves:** +45 %. The band of the D2 matrices grows from 3 to 5.
+- **Nonlinear part:** +5–10 %.
+
+On GPUs, where the transposes dominate, the step costs relatively less extra. The U factors of the banded solves
+take 8 bytes more per grid point, for all orders (`nbw` = 5).
 
 ## 3. Grid sizes that suit the FFTs and the parallel split
 
@@ -68,6 +104,11 @@ Every run prints `wall-clock time per time step` at the end, so you can compare 
   most of the time per step, so this can be the largest single gain. Accuracy: see the README. On one CPU node
   (where the transposes are mostly local memory copies) the gain was only 8%; on GPUs connected by the network,
   measure it with `timing = .true.`.
+- **`fft_2d = .true.`** (only with `pdims = 1, P`, slabs in y): x and z are then both local before the
+  transpose to wall-normal pencils, and one batched 2D FFT replaces the two 1D FFTs, the local transpose between
+  them and one copy. The results agree with the 1D path to round-off (CPU test). It is off by default because it
+  has not been run on a GPU: check it once with `examples/ts_wave`, then compare the time per step with
+  `timing = .true.`.
 - **Slab decompositions** (one of `p1`, `p2` equal to 1) halve the communication: one of the two transposes of
   every FFT becomes a local copy. That copy is done without MPI by cuDecomp and diezDecomp, and through
   MPI_Alltoallv on a one-rank communicator by `'mpi'`.
@@ -89,14 +130,25 @@ and with OpenACC also the GPU memory actually used after the initialisation. Per
 | spectral fields u, v, w, N, N_old, 2 work arrays (11 × 8 B) | 88 |
 | per scalar: s, N, N_old | 24 |
 | physical fields on the dealiased grid, 7 × 18 B (`rotational`); 5 × 18 B with `nl_form = 'advective'` | 126 (90) |
-| wall-normal solver work arrays | 40 |
+| wall-normal solver work arrays | 48 |
 | FFT buffers (shared between stages; also the cuFFT work area) | 30 |
 | transpose buffers (MPI or diezDecomp; cuDecomp similar, printed at start-up) | 24 (12 with `transpose_prec = 'single'`; cuDecomp single: about the same as double, because of staging arrays) |
 | implicit viscous terms (`visc_theta > 0`) / `'vv'` | +24 / +32 |
+| stored pressure factors (`pres_lu_stored = .true.`, the default; not with `'vv'`) | +40 (`fd_order` 4, 6), +72 (8) |
+| `fd_order = 8`: wider band in the solver work arrays | +8 |
 
-Explicit, rotational form, one scalar: about 330 bytes per point, plus the CUDA/NCCL/MPI context (1–2 GB per GPU).
+Explicit, rotational form, one scalar: about 330 bytes per point with `pres_lu_stored = .false.`, 370 with the
+default `.true.`, plus the CUDA/NCCL/MPI context (1–2 GB per GPU).
 Example: 2560 × 385 × 1920 with one scalar: 1.89·10⁹ points × 332 B ≈ 630 GB, i.e. ≈ 79 GB per GPU on 8 GH200s
-(96 GB each).
+(96 GB each). With the stored pressure factors it is 1.89·10⁹ × 372 B ≈ 703 GB, ≈ 88 GB per GPU: on 8 GPUs
+that leaves little margin for the CUDA/MPI context, so check the memory report at start-up and set
+`pres_lu_stored = .false.` if it is too tight; on 16 GPUs (≈ 44 GB per GPU) keep the default. The factors are
+sized by the actual band of B1 (±2 for `fd_order` 4 and 6, ±4 for 8).
+
+**`pres_lu_stored`** (`&physics`): the matrices B1 ± k A1 of the pressure step depend only on k, so by default they
+are factorised once at start-up instead of four times per wavenumber pair and RK substep. Results are bitwise
+identical. On one CPU core the pressure step was 19 % faster (64 × 129 × 64); measure the gain on the GPU with
+`timing = .true.` (line `velocity solve`).
 
 Up to version 7d129bc the four FFT buffers were separate (50 instead of 30 B per point) and every cuFFT plan
 allocated its own work area (up to ~6 B per point per plan). That made this example ≈ 84 GB of arrays per GPU

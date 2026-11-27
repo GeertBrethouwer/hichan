@@ -19,10 +19,14 @@ contains
     call MPI_TYPE_COMMIT(dtype,ierr)
   end subroutine spec_subarray
   !
-  subroutine write_restart(fname,time,istep,dtcur,u,v,w,s)
+  subroutine write_restart(fname,time,istep,dtcur,u,v,w,s,ok)
     !
     ! file layout: u, v, w, s_1, ..., s_nscal as global complex arrays (nx/2, nz, ny);
-    ! a small text header <fname>.hdr holds the metadata
+    ! a small text header <fname>.hdr holds the metadata.
+    ! Both files are written under temporary names (<fname>.bin.tmp, .hdr.tmp) and renamed only
+    ! if every write succeeded, so an existing restart file survives a job that is killed while
+    ! writing, or a full disk (this needs room for two restart files for a moment).
+    ! ok (on all ranks): the new restart file is in place
     !
     implicit none
     character(len=*), intent(in) :: fname
@@ -30,15 +34,25 @@ contains
     integer , intent(in) :: istep
     complex(rp), intent(in) :: u(nkx,nkz,ny),v(nkx,nkz,ny),w(nkx,nkz,ny)
     complex(rp), intent(in), contiguous :: s(:,:,:,:)
-    integer :: fh,dtype,ierr,n,iunit
+    integer :: fh,dtype,ierr,n,iunit,ios,lerr,nerr
     integer(MPI_OFFSET_KIND) :: disp,fsize
+    logical, intent(out) :: ok
     !$acc wait(1)
     !$acc update self(u,v,w,s)
     call spec_subarray(dtype)
-    call MPI_FILE_OPEN(MPI_COMM_WORLD,trim(fname)//'.bin',MPI_MODE_CREATE+MPI_MODE_WRONLY,MPI_INFO_NULL,fh,ierr)
-    if(ierr /= MPI_SUCCESS) call abort_run('cannot open '//trim(fname)//'.bin for writing')
+    call MPI_FILE_OPEN(MPI_COMM_WORLD,trim(fname)//'.bin.tmp',MPI_MODE_CREATE+MPI_MODE_WRONLY,MPI_INFO_NULL,fh,ierr)
+    lerr = merge(1,0,ierr /= MPI_SUCCESS)
+    call MPI_ALLREDUCE(lerr,nerr,1,MPI_INTEGER,MPI_MAX,MPI_COMM_WORLD,ierr)
+    ok = .false.
+    if(nerr /= 0) then
+      if(lerr == 0) call MPI_FILE_CLOSE(fh,ierr)
+      call MPI_TYPE_FREE(dtype,ierr)
+      if(myid == 0) write(*,'(a)') ' WARNING: cannot open '//trim(fname)//'.bin.tmp for writing; '// &
+                                   'no restart file written (a previous one, if any, was kept)'
+      return
+    end if
     fsize = 0
-    call MPI_FILE_SET_SIZE(fh,fsize,ierr)
+    call MPI_FILE_SET_SIZE(fh,fsize,ierr); call check
     fsize = int(nxh,MPI_OFFSET_KIND)*nz*ny*16
     disp = 0
     call write_one(u)
@@ -47,22 +61,49 @@ contains
     do n=1,nscal
       call write_one(s(:,:,:,n))
     end do
-    call MPI_FILE_CLOSE(fh,ierr)
+    call MPI_FILE_CLOSE(fh,ierr); call check
     call MPI_TYPE_FREE(dtype,ierr)
     if(myid == 0) then
-      open(newunit=iunit,file=trim(fname)//'.hdr',status='replace',action='write')
-      write(iunit,'(a)') '# nx ny nz nscal lx lz time istep dt grid_type grid_alpha fd_order'
-      write(iunit,*) nx,ny,nz,nscal
-      write(iunit,*) lx,lz
-      write(iunit,*) time,istep,dtcur
-      write(iunit,*) trim(grid_type),grid_alpha,fd_order
-      close(iunit)
+      open(newunit=iunit,file=trim(fname)//'.hdr.tmp',status='replace',action='write',iostat=ios)
+      if(ios == 0) write(iunit,'(a)',iostat=ios) '# nx ny nz nscal lx lz time istep dt grid_type grid_alpha fd_order'
+      if(ios == 0) write(iunit,*,iostat=ios) nx,ny,nz,nscal
+      if(ios == 0) write(iunit,*,iostat=ios) lx,lz
+      if(ios == 0) write(iunit,*,iostat=ios) time,istep,dtcur
+      if(ios == 0) write(iunit,*,iostat=ios) trim(grid_type),grid_alpha,fd_order
+      if(ios == 0) then
+        close(iunit,iostat=ios)
+      else
+        close(iunit,iostat=n)
+      end if
+      if(ios /= 0) lerr = 1
     end if
+    call MPI_ALLREDUCE(lerr,nerr,1,MPI_INTEGER,MPI_MAX,MPI_COMM_WORLD,ierr)
+    if(myid == 0) then
+      ok = (nerr == 0)
+      if(ok) call replace_file(trim(fname)//'.bin.tmp',trim(fname)//'.bin',ok)
+      if(ok) call replace_file(trim(fname)//'.hdr.tmp',trim(fname)//'.hdr',ok)
+      if(.not.ok) then
+        write(*,'(a,i0,a)') ' WARNING: writing the restart file '//trim(fname)//' failed at step ',istep, &
+                            ' (disk full or quota?); a previous restart file, if any, was kept'
+        call remove_file(trim(fname)//'.bin.tmp')
+        call remove_file(trim(fname)//'.hdr.tmp')
+      end if
+    end if
+    call MPI_BCAST(ok,1,MPI_LOGICAL,0,MPI_COMM_WORLD,ierr)
   contains
+    subroutine remove_file(name)
+      character(len=*), intent(in) :: name
+      integer :: iu,io
+      open(newunit=iu,file=name,status='old',iostat=io)
+      if(io == 0) close(iu,status='delete',iostat=io)
+    end subroutine remove_file
+    subroutine check
+      if(ierr /= MPI_SUCCESS) lerr = 1
+    end subroutine check
     subroutine write_one(f)
       complex(rp), intent(in) :: f(nkx,nkz,ny)
-      call MPI_FILE_SET_VIEW(fh,disp,MPI_DOUBLE_COMPLEX,dtype,'native',MPI_INFO_NULL,ierr)
-      call MPI_FILE_WRITE_ALL(fh,f,nkx*nkz*ny,MPI_DOUBLE_COMPLEX,MPI_STATUS_IGNORE,ierr)
+      call MPI_FILE_SET_VIEW(fh,disp,MPI_DOUBLE_COMPLEX,dtype,'native',MPI_INFO_NULL,ierr); call check
+      call MPI_FILE_WRITE_ALL(fh,f,nkx*nkz*ny,MPI_DOUBLE_COMPLEX,MPI_STATUS_IGNORE,ierr); call check
       disp = disp + fsize
     end subroutine write_one
   end subroutine write_restart

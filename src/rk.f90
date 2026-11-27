@@ -22,7 +22,27 @@ module mod_rk
   use mod_compact, only: kappa1,lam2max
   implicit none
   private
-  public :: init_rk,rk_step,dpdx_applied,dyc_d,impl_nit,impl_res
+  public :: init_rk,rk_step,nonlinear,dpdx_applied,dyc_d,impl_nit,impl_res,extra_forcing,extra_scalar_forcing,t_stage
+  !
+  ! optional body force added to the momentum right-hand sides (nu, nv, nw) at the time t_stage of the
+  ! RK substage; not associated in production runs (used by the manufactured-solution test, tests/mms.f90)
+  !
+  abstract interface
+    subroutine forcing_iface(t,fu,fv,fw)
+      import :: rp
+      real(rp), intent(in) :: t
+      complex(rp), intent(inout) :: fu(:,:,:),fv(:,:,:),fw(:,:,:)
+    end subroutine forcing_iface
+    subroutine scalar_forcing_iface(t,n,fs)
+      import :: rp
+      real(rp), intent(in) :: t
+      integer , intent(in) :: n
+      complex(rp), intent(inout) :: fs(:,:,:)
+    end subroutine scalar_forcing_iface
+  end interface
+  procedure(forcing_iface), pointer :: extra_forcing => null()
+  procedure(scalar_forcing_iface), pointer :: extra_scalar_forcing => null()  ! same, for scalar n
+  real(rp) :: t_stage = 0._rp
   real(rp) :: dpdx_applied = 0._rp
   integer  :: impl_nit = 0          ! iterations of the implicit coupling in the last substep
   real(rp) :: impl_res = 0._rp      ! relative change of v in the last iteration
@@ -68,6 +88,29 @@ contains
       end do
     end do
   end subroutine spec_axpy
+  !
+  subroutine spec_source(f,g,qc,qu)
+    ! g = qc + qu*f (qc in the mean mode)
+    implicit none
+    complex(rp), intent(in)  :: f(nkx,nkz,ny)
+    complex(rp), intent(out) :: g(nkx,nkz,ny)
+    real(rp), intent(in) :: qc,qu
+    integer :: i,j,k
+    !$acc parallel loop collapse(3) default(present) async(1)
+    do k=1,ny
+      do j=1,nkz
+        do i=1,nkx
+          g(i,j,k) = qu*f(i,j,k)
+        end do
+      end do
+    end do
+    if(mean_owner .and. qc /= 0._rp) then
+      !$acc parallel loop default(present) async(1)
+      do k=1,ny
+        g(i00,j00,k) = g(i00,j00,k) + qc
+      end do
+    end if
+  end subroutine spec_source
   !
   subroutine phys_prod(a,b,c,fac,accum)
     ! c = fac*a*b (accum = .false.) or c = c + fac*a*b
@@ -185,27 +228,27 @@ contains
       fa = 1._rp
     end select
     do n=1,nscal
+      qc = ssrc_const(n); qu = ssrc_u(n)/ubulk
       if(fa > 0._rp) then
         call advect(s(:,:,:,n),-fa,skew)
-      else
-        !$acc kernels default(present) async(1)
-        ap(:,:,:) = 0._rp
-        !$acc end kernels
-      end if
-      qc = ssrc_const(n); qu = ssrc_u(n)/ubulk
-      if(qc /= 0._rp .or. qu /= 0._rp) then
-        !$acc parallel loop collapse(3) default(present) async(1)
-        do k=1,nyA
-          do j=1,nzA
-            do i=1,mx
-              ap(i,j,k) = ap(i,j,k) + qc + qu*up(i,j,k)
+        if(qc /= 0._rp .or. qu /= 0._rp) then
+          !$acc parallel loop collapse(3) default(present) async(1)
+          do k=1,nyA
+            do j=1,nzA
+              do i=1,mx
+                ap(i,j,k) = ap(i,j,k) + qc + qu*up(i,j,k)
+              end do
             end do
           end do
-        end do
+        end if
+        call fwd_fft(ap,ns(:,:,:,n))
+      else
+        ! divergence form: no advective part to transform; the (linear) sources are set in spectral space
+        call spec_source(u,ns(:,:,:,n),qc,qu)
       end if
-      call fwd_fft(ap,ns(:,:,:,n))
       if(fa < 1._rp) call add_flux_div(s(:,:,:,n),ns(:,:,:,n),fa-1._rp,skew)
       if(scal_theta(n) == 0._rp) call add_lap(s(:,:,:,n),ns(:,:,:,n),diff(n),tmp1)
+      if(associated(extra_scalar_forcing)) call extra_scalar_forcing(t_stage,n,ns(:,:,:,n))
     end do
     !
     ! momentum
@@ -258,6 +301,7 @@ contains
         nu(i00,j00,k) = nu(i00,j00,k) + dpdx
       end do
     end if
+    if(associated(extra_forcing)) call extra_forcing(t_stage,nu,nv,nw)
     !
     ! velocity-vorticity method: right-hand sides h_g (in nu) and h_v (in nv) of Eqs. (14), (17)
     !
@@ -286,8 +330,8 @@ contains
   !
   real(rp) function compute_dt()
     !
-    ! RK3 stability: |lambda dt| < sqrt(3) on the imaginary axis (advection) and
-    ! < 2.51 on the real axis (explicit diffusion)
+    ! RK3 stability: |lambda dt| < sqrt(3) on the imaginary axis (advection) and < 2.51 on the real axis
+    ! (explicit diffusion) with 3 stages; sqrt(8) and 2.79 with 4 stages (cfl, cfl_visc are absolute limits)
     !
     implicit none
     real(rp) :: cmax,kxm,kzm,dta,dtv,nmax
@@ -384,7 +428,9 @@ contains
     real(rp), intent(inout) :: time,dtcur
     integer :: q,n
     real(rp) :: dtn,dtg,dtz,dtb,c,dpe,th
-    do q=1,3
+    t_stage = time
+    do q=1,rk_stages
+      if(q > 1) t_stage = t_stage + rk_bet(q-1)*dtcur   ! substage times (3 stages: t, t + 8/15 dt, t + 2/3 dt)
       call tic(tm_nl)
       call nonlinear(q == 1,dtn)
       call toc(tm_nl)
@@ -450,7 +496,7 @@ contains
         call toc(tm_vsolve)
       end if
       if(forcing == 'cfr') then
-        if(q == 3) dpdx_applied = dpe
+        if(q == rk_stages) dpdx_applied = dpe
       else
         dpdx_applied = dpdx
       end if
@@ -468,7 +514,7 @@ contains
           c = 0._rp
         end if
         call tic(tm_ssolve)
-        call scalar_solve(s(:,:,:,n),c,sbc_bot(n),sbc_top(n),sval_bot(n),sval_top(n))
+        call scalar_solve(s(:,:,:,n),c,sbc_bot(n),sbc_top(n),sval_bot(n),sval_top(n),tmp1)
         call toc(tm_ssolve)
       end do
     end do

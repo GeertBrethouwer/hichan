@@ -25,7 +25,7 @@
 !
 module mod_ysolve
   use mod_types
-  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run,vv_neumann
+  use mod_param , only: nxh,nz,ny,lx,lz,fd_order,abort_run,vv_neumann,pres_lu_stored,rk_stages
   use mod_decomp, only: nkx,nkz,kx_lo,kz_lo
   use mod_compact, only: nbw,ca1 => a1,cb1 => b1,ca2 => a2,cb2 => b2,ct1w => t1w,ct1d => t1d,ct1u => t1u, &
                          ct2w => t2w,ct2d => t2d,ct2u => t2u,cc1 => c1,ccn => cn,cnc1 => nc1,cncn => ncn, &
@@ -42,10 +42,14 @@ module mod_ysolve
   real(rp), allocatable :: b1m(:,:),t1mw(:),t1md(:),t1mu(:),rxi(:)
   real(rp), allocatable, public :: c1(:),cn(:),wq(:)
   integer :: nc1,ncn,klq,kuq,klh,kuh
+  integer :: kd1,kd2           ! loop half-widths of B1 f and B2 f (actual bandwidths, <= nbw)
   real(rp), allocatable :: kxv(:),kzv(:),kmod(:,:)
   logical , allocatable :: ismean(:,:),isnyq(:)
   real(rp), allocatable :: minv(:,:,:)
   real(rp), allocatable :: uf(:,:,:,:)
+  real(rp), allocatable :: lup(:,:,:,:),lum(:,:,:,:) ! stored LU factors of B1 + k A1 (row 1 replaced) and
+                                                     ! B1 - k A1 (row N replaced), (nkx,nkz,ny,-nbw:nbw):
+                                                     ! L multipliers at -kl..-1, U at 0..ku (pres_lu_stored)
   complex(rp), allocatable :: psi(:,:,:)
   complex(rp), allocatable, public :: phi(:,:,:)
   complex(rp), allocatable :: sx(:,:,:)
@@ -54,9 +58,9 @@ module mod_ysolve
   !
   ! implicit viscous terms (Appendix B.2): per RK substep q, cached for c_q = theta*beta_q*dt/Re
   !
-  real(rp), allocatable :: minv_i(:,:,:,:)   ! (36,nkx,nkz,3) inverse 6x6 influence matrices
-  real(rp), allocatable :: hinv_i(:,:,:,:)   ! (4 ,nkx,nkz,3) inverse 2x2 wall corrections of the Helmholtz solves
-  real(rp) :: c_cached(3) = -1._rp
+  real(rp), allocatable :: minv_i(:,:,:,:)   ! (36,nkx,nkz,rk_stages) inverse 6x6 influence matrices
+  real(rp), allocatable :: hinv_i(:,:,:,:)   ! (4 ,nkx,nkz,rk_stages) inverse 2x2 wall corrections of the Helmholtz solves
+  real(rp) :: c_cached(4) = -1._rp
   complex(rp), allocatable :: vit(:,:,:),cvec(:,:,:),tw1(:,:,:)
   !
   ! velocity-vorticity method ('vv')
@@ -64,7 +68,7 @@ module mod_ysolve
   complex(rp), allocatable, public :: phv(:,:,:),om(:,:,:)  ! phi = lap(v) and omega_y (mean columns: W00, U00)
   complex(rp), allocatable :: wa(:,:,:),wb(:,:,:)
   real(rp), allocatable :: hinv_c(:,:,:,:),ginv_v(:,:,:,:),hinv_v(:,:,:)
-  real(rp) :: c_cached_vv(3) = -1._rp
+  real(rp) :: c_cached_vv(4) = -1._rp
   real(rp), allocatable :: dw1(:),dwn(:)    ! wall-derivative functionals used for dv/dy = 0
   integer :: ndw1,ndwn
 contains
@@ -79,6 +83,7 @@ contains
     nc1 = cnc1; ncn = cncn
     klq = max(ckl1,1); kuq = max(cku1,1)
     klh = max(ckl2,1); kuh = max(cku2,1)
+    kd1 = max(klq,kuq); kd2 = max(klh,kuh)
     !$acc enter data copyin(a1,b1,a2,b2,t1w,t1d,t1u,t2w,t2d,t2u,c1,cn,wq)
     allocate(b1m,source=cb1m); allocate(rxi,source=crxi)
     allocate(t1mw,source=ct1mw); allocate(t1md,source=ct1md); allocate(t1mu,source=ct1mu)
@@ -109,8 +114,9 @@ contains
       end do
     end do
     !$acc enter data copyin(kxv,kzv,kmod,ismean,isnyq)
-    allocate(minv(36,nkx,nkz),uf(nkx,nkz,ny,0:nbw),psi(nkx,nkz,ny),phi(nkx,nkz,ny),sx(nkx,nkz,ny))
+    allocate(minv(36,nkx,nkz),uf(nkx,nkz,ny,0:max(kuq,kuh)),psi(nkx,nkz,ny),phi(nkx,nkz,ny),sx(nkx,nkz,ny))
     !$acc enter data create(minv,uf,psi,phi,sx)
+    if(pres_lu_stored) call init_pressure_lu
     call init_influence_matrix
   end subroutine init_ysolve
   !
@@ -132,7 +138,7 @@ contains
     real(rp), intent(in) :: a(-1:1,n),b(-nbw:nbw,n)
     logical , intent(in) :: rep1,repn
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     real(rp) :: row(-nbw:nbw),f
     complex(rp) :: rr
     integer :: r,o,l,q
@@ -209,11 +215,86 @@ contains
     if(abs(o) <= 1  ) bcol = bcol + ca*a(o,r)
   end function bcol
   !
-  subroutine pres_rhs(n1,n2,n,i,j,kx,kz,kk,a1,b1,u,v,w,x)
+  subroutine bfactor(n1,n2,n,i,j,kl,ku,ca,cb,a,b,rep1,repn,lu)
+    !
+    ! LU factorisation (no pivoting) of ca*A + cb*B for column (i,j), the elimination of bsolve kept for
+    ! bsubst: lu(.,.,r,-kl:-1) = multipliers of row r (0 where bsolve skips an elimination), lu(.,.,r,0:ku) = U
+    !
+    !$acc routine seq
+    implicit none
+    integer , intent(in) :: n1,n2,n,i,j,kl,ku
+    real(rp), intent(in) :: ca,cb
+    real(rp), intent(in) :: a(-1:1,n),b(-nbw:nbw,n)
+    logical , intent(in) :: rep1,repn
+    real(rp), intent(inout) :: lu(n1,n2,n,-kl:ku)
+    real(rp) :: row(-nbw:nbw),f
+    integer :: r,o,l,q
+    do r=1,n
+      do o=-nbw,nbw
+        row(o) = 0._rp
+      end do
+      if((r == 1 .and. rep1) .or. (r == n .and. repn)) then
+        row(0) = 1._rp
+      else
+        do o=-1,1
+          row(o) = ca*a(o,r)
+        end do
+        do o=-kl,ku
+          row(o) = row(o) + cb*b(o,r)
+        end do
+      end if
+      do l=max(1,r-kl),r-1
+        o = l-r
+        f = 0._rp
+        if(row(o) /= 0._rp) then
+          f = row(o)/lu(i,j,l,0)
+          do q=1,ku
+            if(o+q <= ku) row(o+q) = row(o+q) - f*lu(i,j,l,q)
+          end do
+        end if
+        lu(i,j,r,o) = f
+      end do
+      do q=0,ku
+        lu(i,j,r,q) = row(q)
+      end do
+    end do
+  end subroutine bfactor
+  !
+  subroutine bsubst(n1,n2,n,i,j,kl,ku,lu,x)
+    !
+    ! solves with the factors of bfactor: the operations of bsolve without the elimination
+    !
+    !$acc routine seq
+    implicit none
+    integer , intent(in) :: n1,n2,n,i,j,kl,ku
+    real(rp), intent(in) :: lu(n1,n2,n,-kl:ku)
+    complex(rp), intent(inout) :: x(n1,n2,n)
+    real(rp) :: f
+    complex(rp) :: rr
+    integer :: r,l,q
+    do r=1,n
+      rr = x(i,j,r)
+      do l=max(1,r-kl),r-1
+        f = lu(i,j,r,l-r)
+        if(f /= 0._rp) rr = rr - f*x(i,j,l)
+      end do
+      x(i,j,r) = rr
+    end do
+    x(i,j,n) = x(i,j,n)/lu(i,j,n,0)
+    do r=n-1,1,-1
+      rr = x(i,j,r)
+      do q=1,min(ku,n-r)
+        rr = rr - lu(i,j,r,q)*x(i,j,r+q)
+      end do
+      x(i,j,r) = rr/lu(i,j,r,0)
+    end do
+  end subroutine bsubst
+  !
+  subroutine pres_rhs(n1,n2,n,i,j,kx,kz,kk,a1,b1,u,v,w,x,kb)
     ! A1 (i kx rx + i kz rz) + B1 ry, all rows
     !$acc routine seq
     implicit none
-    integer , intent(in) :: n1,n2,n,i,j
+    integer , intent(in) :: n1,n2,n,i,j,kb
     real(rp), intent(in) :: kx,kz,kk,a1(-1:1,n),b1(-nbw:nbw,n)
     complex(rp), intent(in) :: u(n1,n2,n),v(n1,n2,n),w(n1,n2,n)
     complex(rp), intent(inout) :: x(n1,n2,n)
@@ -221,7 +302,7 @@ contains
     complex(rp) :: s
     do r=1,n
       s = (0._rp,0._rp)
-      do o=max(-nbw,1-r),min(nbw,n-r)
+      do o=max(-kb,1-r),min(kb,n-r)
         s = s + b1(o,r)*v(i,j,r+o)
         if(abs(o) <= 1) s = s + a1(o,r)*cmplx(0._rp,1._rp,rp)*(kx*u(i,j,r+o)+kz*w(i,j,r+o))
       end do
@@ -240,7 +321,7 @@ contains
     real(rp), intent(in) :: kk,a1(-1:1,n),b1(-nbw:nbw,n)
     complex(rp), intent(in) :: mu,bt
     complex(rp), intent(inout) :: psi(n1,n2,n),phi(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:kuq)
     complex(rp), intent(out) :: apsn
     integer :: r,o
     complex(rp) :: s
@@ -257,6 +338,34 @@ contains
     phi(i,j,n) = bt
     call bsolve(n1,n2,n,i,j,klq,kuq,-kk,1._rp,a1,b1,.false.,.true.,phi,uf)
   end subroutine pres_two_solves
+  !
+  subroutine pres_two_solves_lu(n1,n2,n,i,j,klq,kuq,a1,mu,bt,psi,phi,lp,lm,apsn)
+    !
+    ! pres_two_solves with the factors stored by init_pressure_lu
+    !
+    !$acc routine seq
+    implicit none
+    integer , intent(in) :: n1,n2,n,i,j,klq,kuq
+    real(rp), intent(in) :: a1(-1:1,n)
+    real(rp), intent(in) :: lp(n1,n2,n,-klq:kuq),lm(n1,n2,n,-klq:kuq)
+    complex(rp), intent(in) :: mu,bt
+    complex(rp), intent(inout) :: psi(n1,n2,n),phi(n1,n2,n)
+    complex(rp), intent(out) :: apsn
+    integer :: r,o
+    complex(rp) :: s
+    psi(i,j,1) = mu
+    call bsubst(n1,n2,n,i,j,klq,kuq,lp,psi)
+    do r=1,n
+      s = (0._rp,0._rp)
+      do o=max(-1,1-r),min(1,n-r)
+        s = s + a1(o,r)*psi(i,j,r+o)
+      end do
+      phi(i,j,r) = s
+    end do
+    apsn = phi(i,j,n)
+    phi(i,j,n) = bt
+    call bsubst(n1,n2,n,i,j,klq,kuq,lm,phi)
+  end subroutine pres_two_solves_lu
   !
   subroutine pres_conds(n1,n2,n,i,j,kk,a1,b1,c1,cn,nc1,ncn,v,psi,phi,rhs1,apsn,sb,st,cc)
     !
@@ -309,6 +418,31 @@ contains
   ! batched operations
   ! ---------------------------------------------------------------------------
   !
+  subroutine init_pressure_lu
+    !
+    ! B1 + k A1 and B1 - k A1 depend only on k: factorise them once for every wavenumber pair (except the
+    ! mean); the pressure steps (explicit and implicit) and the influence matrices then only substitute,
+    ! instead of factorising both matrices twice per column and RK substage
+    !
+    implicit none
+    integer :: i,j
+    real(rp) :: kk
+    if(klq > nbw .or. kuq > nbw) call abort_run('init_pressure_lu: band wider than nbw')
+    allocate(lup(nkx,nkz,ny,-klq:kuq),lum(nkx,nkz,ny,-klq:kuq))   ! band of B1 only, not nbw
+    lup = 0._rp; lum = 0._rp
+    !$acc enter data copyin(lup,lum)
+    !$acc parallel loop gang vector collapse(2) default(present) private(kk) async(1)
+    do j=1,nkz
+      do i=1,nkx
+        if(.not. ismean(i,j)) then
+          kk = kmod(i,j)
+          call bfactor(nkx,nkz,ny,i,j,klq,kuq, kk,1._rp,a1,b1,.true.,.false.,lup)
+          call bfactor(nkx,nkz,ny,i,j,klq,kuq,-kk,1._rp,a1,b1,.false.,.true.,lum)
+        end if
+      end do
+    end do
+  end subroutine init_pressure_lu
+  !
   subroutine init_influence_matrix
     !
     ! 6x6 influence matrix (inverted) for every wavenumber pair
@@ -338,7 +472,11 @@ contains
             call add_sources(nkx,nkz,ny,i,j,a1,b1,-1._rp,xs,psi)
             rhs1 = psi(i,j,1)
             mu = xs(5); bt = xs(6)
-            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,mu,bt,psi,phi,uf,apsn)
+            if(pres_lu_stored) then
+              call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,mu,bt,psi,phi,lup,lum,apsn)
+            else
+              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,mu,bt,psi,phi,uf,apsn)
+            end if
             call pres_conds(nkx,nkz,ny,i,j,kk,a1,b1,c1,cn,nc1,ncn,sx,psi,phi,rhs1,apsn,xs(1),xs(2),cc)
             do q=1,6
               mat(q,m) = real(cc(q),rp)
@@ -419,9 +557,13 @@ contains
           !
           ! particular solution
           !
-          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
           rhs1 = psi(i,j,1)
-          call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+          if(pres_lu_stored) then
+            call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,zero,zero,psi,phi,lup,lum,apsn)
+          else
+            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+          end if
           call pres_conds(nkx,nkz,ny,i,j,kk,a1,b1,c1,cn,nc1,ncn,v,psi,phi,rhs1,apsn,zero,zero,cc)
           !
           ! influence-matrix coefficients
@@ -435,9 +577,13 @@ contains
           !
           ! final solve with the corrected right-hand side and boundary values
           !
-          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+          call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
           call add_sources(nkx,nkz,ny,i,j,a1,b1,-1._rp,xs,psi)
-          call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+          if(pres_lu_stored) then
+            call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,xs(5),xs(6),psi,phi,lup,lum,apsn)
+          else
+            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+          end if
           do r=2,ny-1
             u(i,j,r) = u(i,j,r) - cmplx(0._rp,kx,rp)*phi(i,j,r)
             w(i,j,r) = w(i,j,r) - cmplx(0._rp,kz,rp)*phi(i,j,r)
@@ -491,7 +637,7 @@ contains
       do i=1,nkx
         do r=1,ny
           s = (0._rp,0._rp)
-          do o=max(-nbw,1-r),min(nbw,ny-r)
+          do o=max(-kd1,1-r),min(kd1,ny-r)
             s = s + b1m(o,r)*f(i,j,r+o)
           end do
           if(r > 1) s = s - t1mw(r)*df(i,j,r-1)
@@ -520,7 +666,7 @@ contains
       do i=1,nkx
         do r=1,ny
           s = (0._rp,0._rp)
-          do o=max(-nbw,1-r),min(nbw,ny-r)
+          do o=max(-kd1,1-r),min(kd1,ny-r)
             s = s + b1(o,r)*f(i,j,r+o)
           end do
           if(r > 1) s = s - t1w(r)*df(i,j,r-1)
@@ -550,7 +696,7 @@ contains
         k2 = kmod(i,j)**2
         do r=1,ny
           s = (0._rp,0._rp)
-          do o=max(-nbw,1-r),min(nbw,ny-r)
+          do o=max(-kd2,1-r),min(kd2,ny-r)
             s = s + b2(o,r)*f(i,j,r+o)
           end do
           if(r > 1) s = s - t2w(r)*tmp(i,j,r-1)
@@ -566,7 +712,7 @@ contains
     end do
   end subroutine add_lap
   !
-  subroutine scalar_solve(s,c,bcb,bct,gb,gt)
+  subroutine scalar_solve(s,c,bcb,bct,gb,gt,wk)
     !
     ! theta-method for a scalar:  [ (1 + c k^2) I - c D2 ] s = r  at interior points,
     ! with Dirichlet ('D', s = g) or Neumann ('N', D1 s = g) conditions at the walls
@@ -575,19 +721,65 @@ contains
     ! L s enter rows 2 and N-1 (cf. the sigma-correction of Sec. 3), and are determined
     ! together with the wall values of s by a small influence-matrix system.
     !
+    ! The solution is the particular solution plus the homogeneous solutions weighted by
+    ! the influence-matrix coefficients. H and the right-hand sides of the homogeneous
+    ! problems are real, so one complex banded solve gives two of them (real and imaginary
+    ! part): two solves per column for Dirichlet walls, three with a Neumann wall.
+    ! c = 0 (explicit diffusion): L = I, only the wall values have to be set.
+    ! wk: work array (used with a Neumann wall).
+    !
     implicit none
     complex(rp), intent(inout) :: s(nkx,nkz,ny)
     real(rp), intent(in) :: c,gb,gt
     character(len=1), intent(in) :: bcb,bct
-    integer :: i,j,r,m,q,p,l,nh
-    real(rp) :: k2,ca,cb
-    complex(rp) :: e(4,5),zz(4),f,t,ra1,ran,zero
+    complex(rp), intent(inout) :: wk(nkx,nkz,ny)
+    integer :: i,j,r,q,p,l
+    real(rp) :: k2,ca,cb,m11,m12,m21,m22,det
+    complex(rp) :: e(4,5),zz(4),f,g,t,ra1,ran,zero,r1,r2
     logical :: isnb,isnt,isd
     zero = (0._rp,0._rp)
     isnb = (bcb == 'N'); isnt = (bct == 'N')
     isd  = .not.(isnb.or.isnt)
-    nh = 3
-    if(.not.isd) nh = 5
+    if(c == 0._rp) then
+      !
+      ! explicit diffusion: s = r at the interior points; wall values from the boundary conditions
+      ! (2x2 system: the dense rows of D1 may reach the opposite wall)
+      !
+      !$acc parallel loop gang vector collapse(2) default(present) async(1)
+      do j=1,nkz
+        do i=1,nkx
+          if(isnyq(j)) then
+            do r=1,ny
+              s(i,j,r) = zero
+            end do
+          else
+            r1 = zero; r2 = zero
+            if(ismean(i,j)) then
+              r1 = gb; r2 = gt
+            end if
+            m11 = 1._rp; m12 = 0._rp; m21 = 0._rp; m22 = 1._rp
+            if(isnb) then
+              m11 = c1(1); m12 = 0._rp
+              if(nc1 == ny) m12 = c1(ny)
+              do r=2,min(nc1,ny-1)
+                r1 = r1 - c1(r)*s(i,j,r)
+              end do
+            end if
+            if(isnt) then
+              m22 = cn(ny); m21 = 0._rp
+              if(ncn == ny) m21 = cn(1)
+              do r=max(ny-ncn+1,2),ny-1
+                r2 = r2 - cn(r)*s(i,j,r)
+              end do
+            end if
+            det = m11*m22 - m12*m21
+            s(i,j,1)  = (m22*r1 - m12*r2)/det
+            s(i,j,ny) = (m11*r2 - m21*r1)/det
+          end if
+        end do
+      end do
+      return
+    end if
     !$acc parallel loop gang vector collapse(2) default(present) private(e,zz) async(1)
     do j=1,nkz
       do i=1,nkx
@@ -599,77 +791,115 @@ contains
           k2 = kmod(i,j)**2
           ca = 1._rp + c*k2
           cb = -c
-          ! A2 r~ (r~ = r with zero wall values)
+          ! rows 1 and N of A2 r~ (r~ = r with zero wall values)
           ra1 = a2(1,1)*s(i,j,2)
           ran = a2(-1,ny)*s(i,j,ny-1)
           !
-          ! m = 1: particular; 2: tau_1; 3: tau_N; 4: s(-1) = 1; 5: s(+1) = 1
+          ! columns of e: 1 particular; 2: tau_1; 3: tau_N; 4: s(-1) = 1; 5: s(+1) = 1
+          ! rows of e: rows 1 and N of H s = A2 g, and the two boundary conditions
           !
-          do m=1,nh
-            if(m == 1) then
-              do r=2,ny-1
-                sx(i,j,r) = zero
-                do q=max(-1,2-r),min(1,ny-1-r)
-                  sx(i,j,r) = sx(i,j,r) + a2(q,r)*s(i,j,r+q)
-                end do
-              end do
-              sx(i,j,1) = zero; sx(i,j,ny) = zero
-              if(ismean(i,j)) then
-                if(.not.isnb) sx(i,j,1)  = gb
-                if(.not.isnt) sx(i,j,ny) = gt
-              end if
-            else
-              do r=1,ny
-                sx(i,j,r) = zero
-              end do
-              if(m == 2) sx(i,j,2)    = a2(-1,2)
-              if(m == 3) sx(i,j,ny-1) = a2( 1,ny-1)
-              if(m == 4) sx(i,j,1)    = 1._rp
-              if(m == 5) sx(i,j,ny)   = 1._rp
-            end if
-            call bsolve(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,.true.,.true.,sx,uf)
-            ! conditions: rows 1 and N of H s = A2 g, and the boundary conditions
-            e(1,m) = bmul(nkx,nkz,ny,i,j,1 ,ca,cb,a2,b2,sx)
-            e(2,m) = bmul(nkx,nkz,ny,i,j,ny,ca,cb,a2,b2,sx)
-            if(m == 1) then
-              e(1,m) = e(1,m) - ra1
-              e(2,m) = e(2,m) - ran
-            end if
-            if(m == 2) e(1,m) = e(1,m) - a2(0,1)
-            if(m == 3) e(2,m) = e(2,m) - a2(0,ny)
-            if(isnb) then
-              f = zero
-              do r=1,nc1
-                f = f + c1(r)*sx(i,j,r)
-              end do
-              e(3,m) = f
-              if(m == 1 .and. ismean(i,j)) e(3,m) = e(3,m) - gb
-            else
-              e(3,m) = zero
-              if(m == 4) e(3,m) = (1._rp,0._rp)
-            end if
-            if(isnt) then
-              f = zero
-              do r=ny-ncn+1,ny
-                f = f + cn(r)*sx(i,j,r)
-              end do
-              e(4,m) = f
-              if(m == 1 .and. ismean(i,j)) e(4,m) = e(4,m) - gt
-            else
-              e(4,m) = zero
-              if(m == 5) e(4,m) = (1._rp,0._rp)
-            end if
+          ! particular solution (in sx)
+          !
+          do r=2,ny-1
+            sx(i,j,r) = zero
+            do q=max(-1,2-r),min(1,ny-1-r)
+              sx(i,j,r) = sx(i,j,r) + a2(q,r)*s(i,j,r+q)
+            end do
           end do
+          sx(i,j,1) = zero; sx(i,j,ny) = zero
+          if(ismean(i,j)) then
+            if(.not.isnb) sx(i,j,1)  = gb
+            if(.not.isnt) sx(i,j,ny) = gt
+          end if
+          call bsolve(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,.true.,.true.,sx,uf)
+          e(1,1) = bmul(nkx,nkz,ny,i,j,1 ,ca,cb,a2,b2,sx) - ra1
+          e(2,1) = bmul(nkx,nkz,ny,i,j,ny,ca,cb,a2,b2,sx) - ran
+          e(3,1) = zero; e(4,1) = zero
+          if(isnb) then
+            f = zero
+            do r=1,nc1
+              f = f + c1(r)*sx(i,j,r)
+            end do
+            e(3,1) = f
+            if(ismean(i,j)) e(3,1) = e(3,1) - gb
+          end if
+          if(isnt) then
+            f = zero
+            do r=ny-ncn+1,ny
+              f = f + cn(r)*sx(i,j,r)
+            end do
+            e(4,1) = f
+            if(ismean(i,j)) e(4,1) = e(4,1) - gt
+          end if
           !
-          ! solve sum_m e(:,m+1) zz(m) = -e(:,1)  (Gaussian elimination, partial pivoting)
+          ! homogeneous solutions for tau_1 (real part of psi) and tau_N (imaginary part)
           !
+          do r=1,ny
+            psi(i,j,r) = zero
+          end do
+          psi(i,j,2)    = cmplx(a2(-1,2),0._rp,rp)
+          psi(i,j,ny-1) = cmplx(0._rp,a2(1,ny-1),rp)
+          call bsolve(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,.true.,.true.,psi,uf)
+          t = bmul(nkx,nkz,ny,i,j,1 ,ca,cb,a2,b2,psi)
+          e(1,2) = real(t,rp) - a2(0,1); e(1,3) = aimag(t)
+          t = bmul(nkx,nkz,ny,i,j,ny,ca,cb,a2,b2,psi)
+          e(2,2) = real(t,rp); e(2,3) = aimag(t) - a2(0,ny)
+          f = zero; g = zero
+          if(isnb) then
+            do r=1,nc1
+              f = f + c1(r)*psi(i,j,r)
+            end do
+          end if
+          if(isnt) then
+            do r=ny-ncn+1,ny
+              g = g + cn(r)*psi(i,j,r)
+            end do
+          end if
+          e(3,2) = real(f,rp); e(3,3) = aimag(f)
+          e(4,2) = real(g,rp); e(4,3) = aimag(g)
           if(isd) then
             ! Dirichlet: only tau_1 and tau_N are unknown (2x2)
             f = e(1,2)*e(2,3) - e(1,3)*e(2,2)
             zz(1) = (-e(1,1)*e(2,3) + e(1,3)*e(2,1))/f
             zz(2) = (-e(2,1)*e(1,2) + e(2,2)*e(1,1))/f
-            zz(3) = zero; zz(4) = zero
+            do r=1,ny
+              s(i,j,r) = sx(i,j,r) + zz(1)*real(psi(i,j,r),rp) + zz(2)*aimag(psi(i,j,r))
+            end do
           else
+            !
+            ! homogeneous solutions for the wall values s(-1) = 1 (real part of wk), s(+1) = 1 (imaginary part)
+            !
+            do r=1,ny
+              wk(i,j,r) = zero
+            end do
+            wk(i,j,1)  = (1._rp,0._rp)
+            wk(i,j,ny) = (0._rp,1._rp)
+            call bsolve(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,.true.,.true.,wk,uf)
+            t = bmul(nkx,nkz,ny,i,j,1 ,ca,cb,a2,b2,wk)
+            e(1,4) = real(t,rp); e(1,5) = aimag(t)
+            t = bmul(nkx,nkz,ny,i,j,ny,ca,cb,a2,b2,wk)
+            e(2,4) = real(t,rp); e(2,5) = aimag(t)
+            if(isnb) then
+              f = zero
+              do r=1,nc1
+                f = f + c1(r)*wk(i,j,r)
+              end do
+              e(3,4) = real(f,rp); e(3,5) = aimag(f)
+            else
+              e(3,4) = (1._rp,0._rp); e(3,5) = zero
+            end if
+            if(isnt) then
+              g = zero
+              do r=ny-ncn+1,ny
+                g = g + cn(r)*wk(i,j,r)
+              end do
+              e(4,4) = real(g,rp); e(4,5) = aimag(g)
+            else
+              e(4,4) = zero; e(4,5) = (1._rp,0._rp)
+            end if
+            !
+            ! solve sum_m e(:,m+1) zz(m) = -e(:,1)  (Gaussian elimination, partial pivoting)
+            !
             do q=1,4
               e(q,1) = -e(q,1)
             end do
@@ -697,28 +927,11 @@ contains
               end do
               zz(q) = f/e(q,q+1)
             end do
-          end if
-          !
-          ! final solve with the combined right-hand side
-          !
-          do r=2,ny-1
-            sx(i,j,r) = zero
-            do q=max(-1,2-r),min(1,ny-1-r)
-              sx(i,j,r) = sx(i,j,r) + a2(q,r)*s(i,j,r+q)
+            do r=1,ny
+              s(i,j,r) = sx(i,j,r) + zz(1)*real(psi(i,j,r),rp) + zz(2)*aimag(psi(i,j,r)) &
+                                   + zz(3)*real(wk(i,j,r),rp)  + zz(4)*aimag(wk(i,j,r))
             end do
-          end do
-          sx(i,j,2)    = sx(i,j,2)    + zz(1)*a2(-1,2)
-          sx(i,j,ny-1) = sx(i,j,ny-1) + zz(2)*a2( 1,ny-1)
-          sx(i,j,1)  = zz(3)
-          sx(i,j,ny) = zz(4)
-          if(ismean(i,j)) then
-            if(.not.isnb) sx(i,j,1)  = gb
-            if(.not.isnt) sx(i,j,ny) = gt
           end if
-          call bsolve(nkx,nkz,ny,i,j,klh,kuh,ca,cb,a2,b2,.true.,.true.,sx,uf)
-          do r=1,ny
-            s(i,j,r) = sx(i,j,r)
-          end do
         end if
       end do
     end do
@@ -784,7 +997,7 @@ contains
   !
   subroutine init_implicit
     implicit none
-    allocate(minv_i(36,nkx,nkz,3),hinv_i(4,nkx,nkz,3),vit(nkx,nkz,ny),cvec(nkx,nkz,ny),tw1(nkx,nkz,ny))
+    allocate(minv_i(36,nkx,nkz,rk_stages),hinv_i(4,nkx,nkz,rk_stages),vit(nkx,nkz,ny),cvec(nkx,nkz,ny),tw1(nkx,nkz,ny))
     minv_i = 0._rp; hinv_i = 0._rp; vit = 0._rp; cvec = 0._rp; tw1 = 0._rp
     !$acc enter data copyin(minv_i,hinv_i,vit,cvec,tw1)
     c_cached(:) = -1._rp
@@ -844,7 +1057,7 @@ contains
     integer , intent(in) :: n1,n2,n,i,j,kl,ku
     real(rp), intent(in) :: ca,cb,a2(-1:1,n),b2(-nbw:nbw,n)
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     real(rp), intent(out) :: h(4)
     real(rp) :: m11,m12,m21,m22,det
     integer :: r
@@ -877,7 +1090,7 @@ contains
     real(rp), intent(in) :: ca,cb,a2(-1:1,n),b2(-nbw:nbw,n),h(4)
     complex(rp), intent(in) :: g(n1,n2,n)
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     complex(rp), intent(out) :: t1,tn
     complex(rp) :: e1,e2
     call a2rhs(n1,n2,n,i,j,a2,g,x)
@@ -919,7 +1132,7 @@ contains
     integer , intent(in) :: n1,n2,n,i,j,klh,kuh,nc1,ncn
     real(rp), intent(in) :: kk,ca,cb,a1(-1:1,n),b1(-nbw:nbw,n),a2(-1:1,n),b2(-nbw:nbw,n),c1(n),cn(n),h(4)
     complex(rp), intent(inout) :: psi(n1,n2,n),phi(n1,n2,n),sx(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:kuh)
     complex(rp), intent(in) :: rhs1,apsn,db,dt_
     complex(rp), intent(inout) :: cc(6)
     complex(rp) :: t1,tn,s5,s6
@@ -1021,7 +1234,11 @@ contains
               xs(m) = (1._rp,0._rp)
               call add_sources(nkx,nkz,ny,i,j,a1,b1,1._rp,xs,psi)
               rhs1 = psi(i,j,1)
-              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+              if(pres_lu_stored) then
+                call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,xs(5),xs(6),psi,phi,lup,lum,apsn)
+              else
+                call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+              end if
               cc(1) = bmul(nkx,nkz,ny,i,j,1 , kk,1._rp,a1,b1,psi) - rhs1
               cc(2) = bmul(nkx,nkz,ny,i,j,ny,-kk,1._rp,a1,b1,phi) - apsn
               do r=1,ny
@@ -1110,10 +1327,14 @@ contains
             !
             ! particular solution
             !
-            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
             call add_a1(nkx,nkz,ny,i,j,a1,cvec,psi)
             rhs1 = psi(i,j,1)
-            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+            if(pres_lu_stored) then
+              call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,zero,zero,psi,phi,lup,lum,apsn)
+            else
+              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,zero,zero,psi,phi,uf,apsn)
+            end if
             cc(1) = bmul(nkx,nkz,ny,i,j,1 , kk,1._rp,a1,b1,psi) - rhs1
             cc(2) = bmul(nkx,nkz,ny,i,j,ny,-kk,1._rp,a1,b1,phi) - apsn
             do r=1,ny
@@ -1130,10 +1351,14 @@ contains
             !
             ! corrected solution
             !
-            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi)
+            call pres_rhs(nkx,nkz,ny,i,j,kx,kz,kk,a1,b1,u,v,w,psi,kd1)
             call add_a1(nkx,nkz,ny,i,j,a1,cvec,psi)
             call add_sources(nkx,nkz,ny,i,j,a1,b1,1._rp,xs,psi)
-            call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+            if(pres_lu_stored) then
+              call pres_two_solves_lu(nkx,nkz,ny,i,j,klq,kuq,a1,xs(5),xs(6),psi,phi,lup,lum,apsn)
+            else
+              call pres_two_solves(nkx,nkz,ny,i,j,kk,klq,kuq,a1,b1,xs(5),xs(6),psi,phi,uf,apsn)
+            end if
             do r=1,ny
               psi(i,j,r) = v(i,j,r) - psi(i,j,r) - kk*phi(i,j,r)
             end do
@@ -1209,7 +1434,7 @@ contains
     integer :: r,l
     dpdx_eff = 0._rp
     if(.not.mean_owner) return
-    !$acc serial default(present) private(h)
+    !$acc serial default(present) private(h) async(1)
     do l=1,4
       h(l) = hinv_i(l,i00,j00,q)
     end do
@@ -1278,7 +1503,7 @@ contains
     integer :: i,j,l
     real(rp) :: h(4)
     allocate(phv(nkx,nkz,ny),om(nkx,nkz,ny),wa(nkx,nkz,ny),wb(nkx,nkz,ny))
-    allocate(hinv_c(4,nkx,nkz,3),ginv_v(4,nkx,nkz,3),hinv_v(4,nkx,nkz))
+    allocate(hinv_c(4,nkx,nkz,rk_stages),ginv_v(4,nkx,nkz,rk_stages),hinv_v(4,nkx,nkz))
     phv = 0; om = 0; wa = 0; wb = 0; hinv_c = 0; ginv_v = 0; hinv_v = 0
     !$acc enter data copyin(phv,om,wa,wb,hinv_c,ginv_v,hinv_v)
     c_cached_vv(:) = -1._rp
@@ -1326,7 +1551,7 @@ contains
     real(rp), intent(in) :: ca,cb,a2(-1:1,n),b2(-nbw:nbw,n),h(4)
     complex(rp), intent(in) :: g(n1,n2,n),wa_,wb_
     complex(rp), intent(inout) :: x(n1,n2,n)
-    real(rp), intent(inout) :: uf(n1,n2,n,0:nbw)
+    real(rp), intent(inout) :: uf(n1,n2,n,0:ku)
     complex(rp) :: e1,e2,t1,tn
     call a2rhs(n1,n2,n,i,j,a2,g,x)
     x(i,j,1) = wa_; x(i,j,n) = wb_
@@ -1568,7 +1793,7 @@ contains
     dpdx_eff = 0._rp
     if(.not.mean_owner) return
     zero = (0._rp,0._rp)
-    !$acc serial default(present) private(h)
+    !$acc serial default(present) private(h) async(1)
     do l=1,4
       h(l) = hinv_c(l,i00,j00,q)
     end do
