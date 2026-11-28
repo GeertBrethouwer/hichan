@@ -29,7 +29,7 @@
 module mod_decomp
   use mpi
   use mod_types
-  use mod_param, only: nxh,mx,mz,nz,ny,pdims,abort_run,transpose_lib,transpose_prec, &
+  use mod_param, only: nxh,mx,mz,nz,ny,pdims,abort_run,transpose_lib,transpose_prec,tr_overlap, &
                        cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem
 #if defined(_OPENACC)
   use openacc
@@ -51,6 +51,9 @@ module mod_decomp
   integer, parameter :: TL_MPI = 1, TL_CUDECOMP = 2, TL_DIEZ = 3
   integer :: tlib = TL_MPI
   logical, public :: tr_single = .false.        ! transposes in single precision
+  ! tr_ovl: the grid-B (y <-> z) transposes can run on their own queues (tr_overlap, cuDecomp, p1 = 1): they use
+  ! their own workspace, so that they can run at the same time as the (local) grid-A transposes of queue 1
+  logical, public :: tr_ovl = .false.
 #if defined(_OPENACC)
   integer(acc_handle_kind), public :: istream
 #endif
@@ -62,6 +65,11 @@ module mod_decomp
   complex(sp), pointer, contiguous :: work4(:)              ! single-precision transposes:
   complex(sp), pointer, contiguous, device :: work4_d(:)    !   workspace and staging arrays
   complex(sp), allocatable :: cw4a(:),cw4b(:)
+  complex(rp), pointer, contiguous :: work_b(:)             ! tr_ovl: workspace and staging arrays of the
+  complex(rp), pointer, contiguous, device :: work_b_d(:)   !   grid-B transposes
+  complex(sp), pointer, contiguous :: work4_b(:)
+  complex(sp), pointer, contiguous, device :: work4_b_d(:)
+  complex(sp), allocatable :: cw4a_b(:),cw4b_b(:)
 #endif
   integer :: comm_row,comm_col
   integer, allocatable :: kxlo_r(:),nkx_r(:),zlo_r(:),nz_r(:)   ! per peer in the row communicator
@@ -141,6 +149,13 @@ contains
       write(*,'(a,a)') ' transposes: ',trim(merge('cuDecomp  ',merge('diezDecomp','MPI       ',tlib == TL_DIEZ), &
                                                  tlib == TL_CUDECOMP))//', '//trim(transpose_prec)//' precision'
       write(*,'(a,i0,a,i0)') ' process grid p1 x p2 = ',p1,' x ',p2
+      if(tr_ovl) then
+        write(*,'(a)') ' transposes overlapped with the FFTs and products (tr_overlap; own queues and workspace)'
+      else if(tr_overlap .and. tlib == TL_CUDECOMP) then
+        write(*,'(a)') ' NOTE: tr_overlap needs p1 = 1 (slabs in y, pdims = 1, P): the transposes are not overlapped'
+      else if(tr_overlap) then
+        write(*,'(a)') ' NOTE: tr_overlap overlaps only cuDecomp transposes: same order of operations, no overlap'
+      end if
     end if
   end subroutine init_decomp
   !
@@ -441,6 +456,25 @@ contains
       call acc_map_data(work,work_d,wsize*16_i8)
       tr_work_bytes = 16_i8*wsize
     end if
+    ! overlapped transposes: only with slabs in y (p1 = 1), where the grid-A transposes are local copies and
+    ! never use the network at the same time as the grid-B transposes
+    tr_ovl = tr_overlap .and. p1 == 1
+    if(tr_ovl) then
+      if(tr_single) then
+        allocate(work4_b(wsb))
+        istat = cudecompMalloc(ch,gd_b,work4_b_d,wsb)
+        call acc_map_data(work4_b,work4_b_d,wsb*8_i8)
+        n = max(int(nz,i8)*nyA*nkx,int(nkx,i8)*nkz*ny)
+        allocate(cw4a_b(n),cw4b_b(n))
+        !$acc enter data create(cw4a_b,cw4b_b)
+        tr_work_bytes = tr_work_bytes + 8_i8*wsb + 16_i8*n
+      else
+        allocate(work_b(wsb))
+        istat = cudecompMalloc(ch,gd_b,work_b_d,wsb)
+        call acc_map_data(work_b,work_b_d,wsb*16_i8)
+        tr_work_bytes = tr_work_bytes + 16_i8*wsb
+      end if
+    end if
   end subroutine init_cudecomp
 #endif
   !
@@ -455,6 +489,15 @@ contains
       else
         call acc_unmap_data(work)
         istat = cudecompFree(ch,gd_a,work_d)
+      end if
+      if(tr_ovl) then
+        if(tr_single) then
+          call acc_unmap_data(work4_b)
+          istat = cudecompFree(ch,gd_b,work4_b_d)
+        else
+          call acc_unmap_data(work_b)
+          istat = cudecompFree(ch,gd_b,work_b_d)
+        end if
       end if
       istat = cudecompGridDescDestroy(ch,gd_a)
       istat = cudecompGridDescDestroy(ch,gd_b)
@@ -474,17 +517,18 @@ contains
     integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
+    integer(acc_handle_kind) :: qs
 #endif
     select case(tlib)
 #if defined(_USE_CUDECOMP)
     case(TL_CUDECOMP)
       if(tr_single) then
-        call to_sp(size(xa),xa,cw4a)
+        call to_sp(size(xa),xa,cw4a,1)
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeXToY(ch,gd_a,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
         call cud_check(istat,'XToY')
-        call to_dp(size(ya),cw4b,ya)
+        call to_dp(size(ya),cw4b,ya,1)
       else
         !$acc host_data use_device(xa,ya,work)
         istat = cudecompTransposeXToY(ch,gd_a,xa,ya,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
@@ -585,17 +629,18 @@ contains
     integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
+    integer(acc_handle_kind) :: qs
 #endif
     select case(tlib)
 #if defined(_USE_CUDECOMP)
     case(TL_CUDECOMP)
       if(tr_single) then
-        call to_sp(size(ya),ya,cw4a)
+        call to_sp(size(ya),ya,cw4a,1)
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeYToX(ch,gd_a,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
         call cud_check(istat,'YToX')
-        call to_dp(size(xa),cw4b,xa)
+        call to_dp(size(xa),cw4b,xa,1)
       else
         !$acc host_data use_device(xa,ya,work)
         istat = cudecompTransposeYToX(ch,gd_a,ya,xa,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
@@ -689,24 +734,42 @@ contains
     end select
   end subroutine tr_ya2xa
   !
-  subroutine tr_yb2zb(yb,zb)
+  subroutine tr_yb2zb(yb,zb,q)
+    ! q (optional): the OpenACC queue of the transpose (tr_ovl: its own workspace); default queue 1
     implicit none
+    integer, intent(in), optional :: q
     complex(rp), intent(in ) :: yb(nz,nyA,nkx)
     complex(rp), intent(out) :: zb(nkx,nkz,ny)
     integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
+    integer(acc_handle_kind) :: qs
 #endif
     select case(tlib)
 #if defined(_USE_CUDECOMP)
     case(TL_CUDECOMP)
-      if(tr_single) then
-        call to_sp(size(yb),yb,cw4a)
+      if(present(q) .and. tr_ovl) then  ! on queue q, with the grid-B workspace
+        qs = acc_get_cuda_stream(q)
+        if(tr_single) then
+          call to_sp(size(yb),yb,cw4a_b,q)
+          !$acc host_data use_device(cw4a_b,cw4b_b,work4_b)
+          istat = cudecompTransposeYToZ(ch,gd_b,cw4a_b,cw4b_b,work4_b,CUDECOMP_FLOAT_COMPLEX,stream=qs)
+          !$acc end host_data
+          call cud_check(istat,'YToZ')
+          call to_dp(size(zb),cw4b_b,zb,q)
+        else
+          !$acc host_data use_device(yb,zb,work_b)
+          istat = cudecompTransposeYToZ(ch,gd_b,yb,zb,work_b,CUDECOMP_DOUBLE_COMPLEX,stream=qs)
+          !$acc end host_data
+          call cud_check(istat,'YToZ')
+        end if
+      else if(tr_single) then
+        call to_sp(size(yb),yb,cw4a,1)
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeYToZ(ch,gd_b,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
         call cud_check(istat,'YToZ')
-        call to_dp(size(zb),cw4b,zb)
+        call to_dp(size(zb),cw4b,zb,1)
       else
         !$acc host_data use_device(yb,zb,work)
         istat = cudecompTransposeYToZ(ch,gd_b,yb,zb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
@@ -800,24 +863,42 @@ contains
     end select
   end subroutine tr_yb2zb
   !
-  subroutine tr_zb2yb(zb,yb)
+  subroutine tr_zb2yb(zb,yb,q)
+    ! q (optional): the OpenACC queue of the transpose (tr_ovl: its own workspace); default queue 1
     implicit none
+    integer, intent(in), optional :: q
     complex(rp), intent(in ) :: zb(nkx,nkz,ny)
     complex(rp), intent(out) :: yb(nz,nyA,nkx)
     integer :: i,j,k,p
 #if defined(_USE_CUDECOMP)
     integer :: istat
+    integer(acc_handle_kind) :: qs
 #endif
     select case(tlib)
 #if defined(_USE_CUDECOMP)
     case(TL_CUDECOMP)
-      if(tr_single) then
-        call to_sp(size(zb),zb,cw4a)
+      if(present(q) .and. tr_ovl) then  ! on queue q, with the grid-B workspace
+        qs = acc_get_cuda_stream(q)
+        if(tr_single) then
+          call to_sp(size(zb),zb,cw4a_b,q)
+          !$acc host_data use_device(cw4a_b,cw4b_b,work4_b)
+          istat = cudecompTransposeZToY(ch,gd_b,cw4a_b,cw4b_b,work4_b,CUDECOMP_FLOAT_COMPLEX,stream=qs)
+          !$acc end host_data
+          call cud_check(istat,'ZToY')
+          call to_dp(size(yb),cw4b_b,yb,q)
+        else
+          !$acc host_data use_device(yb,zb,work_b)
+          istat = cudecompTransposeZToY(ch,gd_b,zb,yb,work_b,CUDECOMP_DOUBLE_COMPLEX,stream=qs)
+          !$acc end host_data
+          call cud_check(istat,'ZToY')
+        end if
+      else if(tr_single) then
+        call to_sp(size(zb),zb,cw4a,1)
         !$acc host_data use_device(cw4a,cw4b,work4)
         istat = cudecompTransposeZToY(ch,gd_b,cw4a,cw4b,work4,CUDECOMP_FLOAT_COMPLEX,stream=istream)
         !$acc end host_data
         call cud_check(istat,'ZToY')
-        call to_dp(size(yb),cw4b,yb)
+        call to_dp(size(yb),cw4b,yb,1)
       else
         !$acc host_data use_device(yb,zb,work)
         istat = cudecompTransposeZToY(ch,gd_b,zb,yb,work,CUDECOMP_DOUBLE_COMPLEX,stream=istream)
@@ -930,26 +1011,26 @@ contains
     if(istat /= CUDECOMP_RESULT_SUCCESS) call abort_run('cuDecomp transpose '//what//' failed')
   end subroutine cud_check
   !
-  subroutine to_sp(n,a,b)
-    ! b = a rounded to single precision
+  subroutine to_sp(n,a,b,q)
+    ! b = a rounded to single precision (on queue q)
     implicit none
-    integer, intent(in) :: n
+    integer, intent(in) :: n,q
     complex(rp), intent(in) :: a(n)
     complex(sp), intent(out) :: b(n)
     integer :: i
-    !$acc parallel loop default(present) async(1)
+    !$acc parallel loop default(present) async(q)
     do i=1,n
       b(i) = cmplx(a(i),kind=sp)
     end do
   end subroutine to_sp
   !
-  subroutine to_dp(n,b,a)
+  subroutine to_dp(n,b,a,q)
     implicit none
-    integer, intent(in) :: n
+    integer, intent(in) :: n,q
     complex(sp), intent(in) :: b(n)
     complex(rp), intent(out) :: a(n)
     integer :: i
-    !$acc parallel loop default(present) async(1)
+    !$acc parallel loop default(present) async(q)
     do i=1,n
       a(i) = cmplx(b(i),kind=rp)
     end do

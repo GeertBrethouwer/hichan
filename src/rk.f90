@@ -14,8 +14,8 @@ module mod_rk
   use mod_param
   use mod_decomp , only: nkx,nkz,nzA,nyA,yA_lo,zA_lo
   use mod_fields
-  use mod_fft    , only: fwd_fft,bwd_fft
-  use mod_timer  , only: tic,toc,tm_nl,tm_dt,tm_vsolve,tm_ssolve
+  use mod_fft    , only: fwd_fft,bwd_fft,bwd_start,bwd_finish,fwd_launch,pipe_sync
+  use mod_timer  , only: tic,toc,tm_nl,tm_dt,tm_vsolve,tm_ssolve,tm_fft
   use mod_ysolve , only: deriv1,deriv1m,add_lap,pressure_step,scalar_solve,cfr_correct,kxv,kzv,mean_owner,i00,j00, &
                          set_implicit_guess,pressure_step_implicit,cfr_correct_implicit,mean_gradient_max, &
                          vv_rhs_terms,vv_step,vv_cfr,phv,om
@@ -201,6 +201,9 @@ contains
     integer :: n,i,j,k
     real(rp) :: qc,qu,fa
     logical  :: skew
+    if(tr_overlap .and. trim(nl_form) == 'rotational' .and. (nscal == 0 .or. trim(scal_form) == 'advective')) then
+      call nonlinear_pipe(is_first,dtnew)    ! the same terms, transposes overlapped with the FFTs
+    else
     call bwd_fft(u,up)
     call bwd_fft(v,vp)
     call bwd_fft(w,wp)
@@ -284,6 +287,7 @@ contains
       call phys_prod(vp,gp(:,:,:,1),ap,-1._rp,.true.)
       call fwd_fft(ap,nw)
     end if
+    end if  ! tr_overlap
     if(visc_theta == 0._rp .and. ns_method /= 'vv') then
       call add_lap(u,nu,visc,tmp1)
       call add_lap(v,nv,visc,tmp1)
@@ -307,6 +311,89 @@ contains
     !
     if(ns_method == 'vv') call vv_rhs_terms(nu,nv,nw)
   end subroutine nonlinear
+  !
+  subroutine nonlinear_pipe(is_first,dtnew)
+    !
+    ! The transforms of nonlinear() for nl_form = 'rotational' and scal_form = 'advective', pipelined (tr_overlap,
+    ! see mod_fft): while the network transposes field k + 1, queue 1 does the FFTs and products of field k. The
+    ! terms are computed with the same operations in the same order as in nonlinear(), so the results are
+    ! identical. tmp1 and tmp2 hold the spectral inputs of the backward transforms in turn; an input is
+    ! overwritten only after the transform that reads it has finished (bwd_finish).
+    !
+    implicit none
+    logical , intent(in)  :: is_first
+    real(rp), intent(out) :: dtnew
+    integer :: n,i,j,k,id1,id2,id3
+    real(rp) :: qc,qu
+    call tic(tm_fft)
+    ! velocities
+    call bwd_start(u,id1)
+    call bwd_start(v,id2)
+    call bwd_finish(id1,up)
+    call bwd_start(w,id3)
+    call bwd_finish(id2,vp)
+    call bwd_finish(id3,wp)
+    dtnew = dt
+    if(is_first .and. .not.fixed_dt) then
+      call tic(tm_dt); dtnew = compute_dt(); call toc(tm_dt)
+    end if
+    ! scalars: -u.grad(s) + sources
+    do n=1,nscal
+      qc = ssrc_const(n); qu = ssrc_u(n)/ubulk
+      call spec_mul(s(:,:,:,n),tmp1,1._rp,0._rp)
+      call bwd_start(tmp1,id1)                     ! ds/dx
+      call deriv1(s(:,:,:,n),tmp2)
+      call bwd_start(tmp2,id2)                     ! ds/dy
+      call bwd_finish(id1,gp(:,:,:,1))
+      call spec_mul(s(:,:,:,n),tmp1,0._rp,1._rp)
+      call bwd_start(tmp1,id3)                     ! ds/dz
+      call bwd_finish(id2,gp(:,:,:,2))
+      call bwd_finish(id3,gp(:,:,:,3))
+      call phys_prod(up,gp(:,:,:,1),ap,-1._rp,.false.)
+      call phys_prod(vp,gp(:,:,:,2),ap,-1._rp,.true.)
+      call phys_prod(wp,gp(:,:,:,3),ap,-1._rp,.true.)
+      if(qc /= 0._rp .or. qu /= 0._rp) then
+        !$acc parallel loop collapse(3) default(present) async(1)
+        do k=1,nyA
+          do j=1,nzA
+            do i=1,mx
+              ap(i,j,k) = ap(i,j,k) + qc + qu*up(i,j,k)
+            end do
+          end do
+        end do
+      end if
+      call fwd_launch(ap,ns(:,:,:,n))              ! its transpose runs during the next transforms
+      if(scal_theta(n) == 0._rp .or. associated(extra_scalar_forcing)) then
+        call pipe_sync                             ! ns is needed now
+        if(scal_theta(n) == 0._rp) call add_lap(s(:,:,:,n),ns(:,:,:,n),diff(n),tmp1)
+        if(associated(extra_scalar_forcing)) call extra_scalar_forcing(t_stage,n,ns(:,:,:,n))
+      end if
+    end do
+    ! momentum: N = u x omega
+    call deriv1(w,tmp1)
+    call spec_axpy(v,tmp1,0._rp,-1._rp,1._rp)
+    call bwd_start(tmp1,id1)                       ! omega_x = dw/dy - dv/dz
+    call spec_mul(u,tmp2,0._rp,1._rp)
+    call spec_axpy(w,tmp2,-1._rp,0._rp,1._rp)
+    call bwd_start(tmp2,id2)                       ! omega_y = du/dz - dw/dx
+    call bwd_finish(id1,gp(:,:,:,1))
+    call deriv1(u,tmp1)
+    call spec_axpy(v,tmp1,1._rp,0._rp,-1._rp)
+    call bwd_start(tmp1,id3)                       ! omega_z = dv/dx - du/dy
+    call bwd_finish(id2,gp(:,:,:,2))
+    call bwd_finish(id3,gp(:,:,:,3))
+    call phys_prod(vp,gp(:,:,:,3),ap, 1._rp,.false.)
+    call phys_prod(wp,gp(:,:,:,2),ap,-1._rp,.true.)
+    call fwd_launch(ap,nu)
+    call phys_prod(wp,gp(:,:,:,1),ap, 1._rp,.false.)
+    call phys_prod(up,gp(:,:,:,3),ap,-1._rp,.true.)
+    call fwd_launch(ap,nv)
+    call phys_prod(up,gp(:,:,:,2),ap, 1._rp,.false.)
+    call phys_prod(vp,gp(:,:,:,1),ap,-1._rp,.true.)
+    call fwd_launch(ap,nw)
+    call pipe_sync
+    call toc(tm_fft)
+  end subroutine nonlinear_pipe
   !
   subroutine add_buoyancy(f,b)
     ! (nu,nv,nw) <- (nu,nv,nw) + b(1:3)*f

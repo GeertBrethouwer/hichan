@@ -109,6 +109,25 @@ take 8 bytes more per grid point, for all orders (`nbw` = 5).
   them and one copy. The results agree with the 1D path to round-off (CPU test). It is off by default because it
   has not been run on a GPU: check it once with `examples/ts_wave`, then compare the time per step with
   `timing = .true.`.
+- **`tr_overlap = .true.`** overlaps the network transposes with the FFTs and products of the nonlinear terms:
+  while one field goes over the network, the GPU transforms the previous one. Results are identical to
+  `tr_overlap = .false.` (the same operations in the same order; checked on the CPU in 6 configurations).
+  - How: the y↔z transposes (grid B) run on OpenACC queues 2 and 3 in turn, everything else on queue 1. Each
+    transpose waits for the previous one, so the NCCL calls stay in the same order on all ranks. Two buffer
+    slots, a second cuDecomp workspace for grid B, and the cuFFT work area set to the slot being transformed.
+  - When: cuDecomp with slabs `pdims = 1, P` (the grid-A transposes are then local copies, never on the network
+    at the same time), `nl_form = 'rotational'` and `scal_form = 'advective'`. In other cases the pipelined order
+    is run without overlap (MPI, diezDecomp, `p1 > 1`), or the usual code (other forms); a note at start-up says so.
+  - Memory: one more transpose buffer and the grid-B workspace, about 3–4 GB per GPU at 2560 × 385 × 1920 on 12
+    GPUs (see the memory report).
+  - Gain: at most the time of the work that can run during the transposes, i.e. the FFTs and products of the
+    nonlinear terms (about 0.4 of 3.1 s per step in the production case with 12 GPUs, where the transposes take
+    2.2 s); NCCL also uses some of the GPU. Expect 5–15 %, more together with `transpose_prec = 'single'` (which
+    halves the 2.2 s). With `timing = .true.` the nonlinear transforms are timed as a whole (`FFTs incl.
+    transposes`); the `transposes` line no longer contains them, since they overlap with other work.
+  - Test: `examples/arrhenius_overlap_test.sh` runs a production case four times from its restart file (as is,
+    `tr_overlap`, `transpose_prec = 'single'`, both), checks that the overlap gives identical results and prints
+    the time per step.
 - **Slab decompositions** (one of `p1`, `p2` equal to 1) halve the communication: one of the two transposes of
   every FFT becomes a local copy. That copy is done without MPI by cuDecomp and diezDecomp, and through
   MPI_Alltoallv on a one-rank communicator by `'mpi'`.
@@ -185,6 +204,19 @@ If a case does not fit:
 | P-TDMA: distributed wall-normal tridiagonal solves (cyclic reduction plus a reduced system), which remove the transposes to wall-normal pencils | not implemented. In HiCHAN the wall-normal operators are compact (tridiagonal A and banded B up to ±3) with influence-matrix wall conditions, which couple both walls and use dense first and last rows of D1. A distributed version needs a banded (SPIKE/block cyclic reduction) solver and global wall couplings. The paper gains 1.5× per step at 1024 GPUs, but for slab grids, the natural choice at moderate GPU counts, these transposes are already local. Worth it only for very large runs |
 | splitting the implicit solves into a set-up part and a run-time part | already done in this form: the influence matrices and the implicit 6×6/2×2 corrections are cached per wavenumber (and RK substep), and the banded factorisations are rebuilt on the fly from a few shared coefficient rows. Storing per-column factors would increase memory traffic on the GPU |
 | direct x↔z transposes for the implicit 1D diffusion | not applicable: HiCHAN always needs the intermediate z-FFT pencil |
+
+## CaNS v4.3.0 (and v4.1/4.2) and HiCHAN
+
+| CaNS | HiCHAN |
+|---|---|
+| periodic-z Poisson solver: auxiliary solution of the periodic tridiagonal systems computed once and reused | the same idea is in place: `pres_lu_stored` factorises the pressure matrices once at start-up |
+| restart files written under temporary names and renamed when complete; aborted runs do not overwrite the last restart | in place (restart files and `restart.stats`) |
+| wall-clock limit stops all tasks at the same time step | in place (`wall_time_max`, decided on rank 0 and broadcast) |
+| output periods in physical time (`tout*`, `tsave`) | for the time samples (`tout_samples`); log, statistics and restart files are still in steps |
+| bulk forcing balancing the wall shear exactly over each substage | constant flow rate is imposed exactly every substage (`forcing = 'cfr'`) |
+| selective halo exchanges (v4.1: 19 fewer per RK stage), kernel fusion | not applicable: HiCHAN is spectral in x and z and has no halos |
+| hipDecomp (AMD GPUs) | not needed on Arrhenius (NVIDIA) |
+| diezDecomp, cuDecomp updates | diezDecomp is available (`transpose_lib = 'diezdecomp'`, build with `DIEZDECOMP=1`). It moves the same data as cuDecomp, so on the network-bound production case it can only gain through fewer copies; it uses MPI, which was 2–4× slower than NCCL in cuDecomp's autotuning on Arrhenius. Worth one timing run, not more |
 
 ## Not in the input file
 

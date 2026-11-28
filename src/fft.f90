@@ -11,7 +11,7 @@
 module mod_fft
   use, intrinsic :: iso_c_binding
   use mod_types
-  use mod_param , only: nxh,nz,ny,mx,mz,abort_run,fft_2d
+  use mod_param , only: nxh,nz,ny,mx,mz,abort_run,fft_2d,tr_overlap
   use mod_decomp, only: nzA,nyA,nkx,nkz,tr_xa2ya,tr_ya2xa,tr_yb2zb,tr_zb2yb,p1,myid
   use mod_timer , only: tic,toc,tm_fft,tm_tr
 #if defined(_OPENACC)
@@ -24,6 +24,7 @@ module mod_fft
 #endif
   private
   public :: init_fft,fwd_fft,bwd_fft,end_fft,fft_buffer_bytes
+  public :: bwd_start,bwd_finish,fwd_launch,pipe_sync
   !
   ! work buffers, shared by stages that are never active at the same time:
   !   bufp: cxw(mx/2+1,nzA,nyA) (x-FFT, spectral side)  and  yaw(mz,nyA,nkx) (z-FFT)
@@ -31,6 +32,21 @@ module mod_fft
   ! On GPUs bufa is also the work area of all cuFFT plans: it is idle during every cuFFT call.
   !
   complex(rp), allocatable :: bufp(:),bufa(:)
+  !
+  ! pipelined transforms (tr_overlap): the y <-> z transposes (grid B, over the network) run on OpenACC queues 2 and
+  ! 3 in turn, the FFTs and everything else on queue 1. Transform number k (counted in kpipe) uses the buffer slot
+  ! 1 + mod(k,2) (bufa or bufa2) and the queue 2 + mod(k,2). Every transpose waits for queue 1 and for the previous
+  ! transpose (the other queue), so the transposes run one after the other in the same order on all ranks, while
+  ! queue 1 computes the FFTs of the previous field. Slot reuse: transform k + 2 uses the slot and queue of k.
+  !   backward: bwd_start(fh,id) starts the transpose of field fh; bwd_finish(id,phys) waits for it and does the
+  !             FFTs into phys. The caller starts at most one transform ahead: start(k+1) before finish(k).
+  !   forward : fwd_launch(phys,fh) does the FFTs of phys (queue 1) and starts the transpose into fh; it must not
+  !             come between bwd_start and bwd_finish of another field.
+  !   pipe_sync: queue 1 waits for all transposes (before fh of a forward transform is used)
+  ! On the CPU everything runs in program order: the results are the same as with fwd_fft/bwd_fft.
+  !
+  complex(rp), allocatable :: bufa2(:)
+  integer :: kpipe = 0
 #if defined(_OPENACC)
   integer :: plan_xf,plan_xb,plan_z
 #else
@@ -103,6 +119,10 @@ contains
 #endif
     allocate(bufp(np_),bufa(na_))
     !$acc enter data create(bufp,bufa)
+    if(tr_overlap) then
+      allocate(bufa2(na_))
+      !$acc enter data create(bufa2)
+    end if
 #if defined(_OPENACC)
 #if !defined(_CUFFT_AUTO_WORK)
     !$acc host_data use_device(bufa)
@@ -148,6 +168,7 @@ contains
   integer(i8) function fft_buffer_bytes()
     implicit none
     fft_buffer_bytes = 16_i8*(size(bufp,kind=i8)+size(bufa,kind=i8))
+    if(allocated(bufa2)) fft_buffer_bytes = fft_buffer_bytes + 16_i8*size(bufa2,kind=i8)
   end function fft_buffer_bytes
   !
   subroutine end_fft
@@ -163,7 +184,122 @@ contains
     end if
 #endif
     !$acc exit data delete(bufp,bufa)
+    if(allocated(bufa2)) then
+      !$acc exit data delete(bufa2)
+    end if
   end subroutine end_fft
+  !
+  ! --------------------------------------------------------------------- pipelined transforms (tr_overlap)
+  !
+  subroutine work_area(slot)
+    ! the cuFFT work area: the buffer of the slot being transformed (its data are copied to bufp before any FFT)
+    implicit none
+    integer, intent(in) :: slot
+#if defined(_OPENACC) && !defined(_CUFFT_AUTO_WORK)
+    integer :: istat
+    if(slot == 1) then
+      !$acc host_data use_device(bufa)
+      istat = cufftSetWorkArea(plan_xf,bufa)
+      istat = istat + cufftSetWorkArea(plan_xb,bufa)
+      if(.not.use2d) istat = istat + cufftSetWorkArea(plan_z,bufa)
+      !$acc end host_data
+    else
+      !$acc host_data use_device(bufa2)
+      istat = cufftSetWorkArea(plan_xf,bufa2)
+      istat = istat + cufftSetWorkArea(plan_xb,bufa2)
+      if(.not.use2d) istat = istat + cufftSetWorkArea(plan_z,bufa2)
+      !$acc end host_data
+    end if
+    if(istat /= CUFFT_SUCCESS) call abort_run('cufftSetWorkArea failed')
+#endif
+  end subroutine work_area
+  !
+  subroutine bwd_start(fh,id)
+    ! start the transform of fh (spectral, z-pencil) to physical space: its transpose (queue 2 or 3)
+    implicit none
+    complex(rp), intent(in)  :: fh(nkx,nkz,ny)
+    integer    , intent(out) :: id
+    integer :: q,qo
+    kpipe = kpipe+1
+    id = kpipe
+    q = 2+mod(id,2); qo = 5-q
+    !$acc wait(1) async(q)
+    !$acc wait(qo) async(q)
+    if(mod(id,2) == 0) then
+      call tr_zb2yb(fh,bufa ,q)
+    else
+      call tr_zb2yb(fh,bufa2,q)
+    end if
+  end subroutine bwd_start
+  !
+  subroutine bwd_finish(id,phys)
+    ! finish transform id (started by bwd_start): wait for its transpose, then the FFTs (queue 1)
+    implicit none
+    integer , intent(in)  :: id
+    real(rp), intent(out) :: phys(mx,nzA,nyA)
+    integer :: q
+    q = 2+mod(id,2)
+    !$acc wait(q) async(1)
+    if(mod(id,2) == 0) then
+      call bwd_local(bufa ,1)
+    else
+      call bwd_local(bufa2,2)
+    end if
+  contains
+    subroutine bwd_local(ba,slot)
+      complex(rp), intent(inout) :: ba(*)
+      integer, intent(in) :: slot
+      call work_area(slot)
+      if(use2d) then
+        call bwd_zx(ba,bufp,phys)                                   ! ybw -> cxw -> phys
+      else
+        call bwd_z(ba,bufp)                                         ! ybw -> yaw
+        call tr_ya2xa(bufp,ba)                                      ! yaw -> xaw (local, p1 = 1)
+        call bwd_x(ba,bufp,phys)                                    ! xaw -> cxw -> phys
+      end if
+    end subroutine bwd_local
+  end subroutine bwd_finish
+  !
+  subroutine fwd_launch(phys,fh)
+    ! physical -> spectral: the FFTs (queue 1), then the transpose into fh (queue 2 or 3); fh is complete after
+    ! pipe_sync. phys may be overwritten (as in fwd_fft) and can be reused on queue 1 right away
+    implicit none
+    real(rp)   , intent(inout) :: phys(mx,nzA,nyA)
+    complex(rp), intent(out)   :: fh(nkx,nkz,ny)
+    integer :: id,q,qo
+    kpipe = kpipe+1
+    id = kpipe
+    q = 2+mod(id,2); qo = 5-q
+    !$acc wait(q) async(1)
+    if(mod(id,2) == 0) then
+      call fwd_local(bufa ,1)
+    else
+      call fwd_local(bufa2,2)
+    end if
+  contains
+    subroutine fwd_local(ba,slot)
+      complex(rp), intent(inout) :: ba(*)
+      integer, intent(in) :: slot
+      call work_area(slot)
+      if(use2d) then
+        call fwd_xz(phys,bufp,ba)                                   ! phys -> cxw -> ybw
+      else
+        call fwd_x(phys,bufp,ba)                                    ! phys -> cxw -> xaw
+        call tr_xa2ya(ba,bufp)                                      ! xaw -> yaw (local, p1 = 1)
+        call fwd_z(bufp,ba)                                         ! yaw -> ybw
+      end if
+      !$acc wait(1) async(q)
+      !$acc wait(qo) async(q)
+      call tr_yb2zb(ba,fh,q)                                        ! ybw -> fh
+    end subroutine fwd_local
+  end subroutine fwd_launch
+  !
+  subroutine pipe_sync
+    ! queue 1 waits for all transposes of the pipeline; the cuFFT work area back to bufa (fwd_fft, bwd_fft)
+    implicit none
+    !$acc wait(2,3) async(1)
+    call work_area(1)
+  end subroutine pipe_sync
   !
   subroutine fwd_fft(phys,fh)
     !

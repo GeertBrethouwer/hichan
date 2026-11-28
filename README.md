@@ -376,7 +376,7 @@ comment, items that are not given keep their defaults, and per-scalar items are 
 | `&output` | `data_dir`, `iout_log`, `iout_stats`, `iout_save_stats`, `iout_restart`, `iout_field`, `tstats_start`, `stats_restart`, `iout_samples`, `tout_samples`, `tsamples_start`, `samples_dir` (time samples, see Output), `mode_log_kx`, `mode_log_kz`, `timing` (timers, report, time per step), `timing_sync` |
 | `&scalars` | `nscal`; per scalar `pr(n)`, `scal_theta(n)`, `sbc_bot(n)`/`sbc_top(n)` (`D`/`N`), `sval_bot(n)`/`sval_top(n)`, `ssrc_const(n)`, `ssrc_u(n)`, `sinit(n)`; `scal_form` (`advective`/`divergence`/`skew`) |
 | `&buoyancy` | `gravity` (direction, any orientation), `ri(n)` (Richardson number per scalar, 0 = passive) |
-| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem`, `fft_2d` |
+| `&parallel` | `pdims`, `transpose_lib` (`auto`/`cudecomp`/`diezdecomp`/`mpi`), `transpose_prec` (`double`/`single`), `cudecomp_t_backend`, `cudecomp_enable_nccl`, `cudecomp_enable_nvshmem`, `fft_2d`, `tr_overlap` (transposes overlapped with the FFTs; PERF.md section 4) |
 
 ## Output (in `data_dir`)
 
