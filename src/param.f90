@@ -141,6 +141,7 @@ module mod_param
 contains
   subroutine read_input(myid)
     implicit none
+    character(len=512) :: infile
     integer, intent(in) :: myid
     integer :: iunit,ios
     namelist /grid/ nx,ny,nz,lx,lz,grid_type,grid_alpha,grid_file,fd_order,dealias
@@ -155,8 +156,11 @@ contains
     namelist /parallel/ pdims,transpose_lib,transpose_prec,cudecomp_t_backend,cudecomp_enable_nccl,cudecomp_enable_nvshmem, &
                         fft_2d,tr_overlap
     !
-    open(newunit=iunit,file='input.nml',status='old',action='read',iostat=ios)
-    if(ios /= 0) call abort_run('cannot open input.nml')
+    ! the input file: the first command-line argument (e.g. hichan input_test.nml), else input.nml
+    infile = 'input.nml'
+    if(command_argument_count() >= 1) call get_command_argument(1,infile)
+    open(newunit=iunit,file=trim(infile),status='old',action='read',iostat=ios)
+    if(ios /= 0) call abort_run('cannot open the input file '//trim(infile))
     read(iunit,nml=grid    ,iostat=ios); if(ios /= 0) call abort_run('error reading namelist &grid')
     rewind(iunit)
     read(iunit,nml=physics ,iostat=ios); if(ios /= 0) call abort_run('error reading namelist &physics')
